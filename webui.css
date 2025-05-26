@@ -166,9 +166,9 @@
     --shadow-lg: 0 10px 15px rgba(85, 77, 175, 0.04), 0 4px 6px rgba(85, 77, 175, 0.03);
 
     /* 尺寸变量 */
-    --sidebar-width: 380px;
+    --sidebar-width: 320px;
     --sidebar-transition: width 0.3s ease, padding 0.3s ease, border 0.3s ease, transform 0.3s ease;
-    --content-padding: 24px;
+    --content-padding: 16px;
 
     /* 动画速度 */
     --transition-speed: 0.2s;
@@ -296,7 +296,7 @@ body {
     display: flex;
     height: 100vh;
     overflow: hidden;
-    font-size: 16px;
+    font-size: 12px;
     line-height: 1.6;
     transition: background-color var(--transition-speed), color var(--transition-speed);
 }
@@ -311,7 +311,8 @@ body {
 }
 
 .chat-panel {
-    flex-grow: 1;
+    /* flex-grow: 1; Removed, no longer a direct flex child competing for space with sidebar */
+    width: 100%; /* Takes full width as sidebar is overlay */
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -322,32 +323,48 @@ body {
 
 /* --- 侧边栏样式改进 --- */
 .sidebar-panel {
-    width: var(--sidebar-width);
+    width: var(--sidebar-width); /* Retain for content & transition */
     height: 100%;
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    background-color: var(--sidebar-bg);
-    border-left: 1px solid var(--sidebar-border);
-    transition: var(--sidebar-transition), background-color var(--transition-speed);
-    position: relative;
-    box-shadow: -1px 0 3px rgba(0, 0, 0, 0.05);
+    display: flex; /* Retain for internal flex layout of its children (log-area) */
+    flex-direction: column; /* Retain */
+    overflow: hidden; /* Retain */
+    background-color: var(--sidebar-bg); /* Retain */
+    /* border-left removed here, added to :not(.collapsed) */
+    transition: var(--sidebar-transition), background-color var(--transition-speed); /* Retain */
+
+    /* New global styles, moved from @media (max-width: 768px) */
+    position: fixed;
+    right: 0;
+    top: 0;
+    z-index: 100;
+    box-shadow: -2px 0 8px rgba(0, 0, 0, 0.15); /* New shadow */
+    transform: translateX(100%); /* Default to collapsed/off-screen */
+}
+
+.sidebar-panel:not(.collapsed) { /* When open */
+    transform: translateX(0%);
+    border-left: 1px solid var(--sidebar-border); /* Show border when open */
 }
 
 .sidebar-panel.collapsed {
-    width: 0;
-    padding: 0;
-    border-left: none;
-    overflow: hidden;
+    /* transform: translateX(100%); */ /* Base .sidebar-panel already has this. */
+    /* width: var(--sidebar-width); */   /* Base .sidebar-panel already has this. */
+    padding: 0; /* Consistent with no content shown */
+    border-left: none; /* No border when slid away */
+    overflow: hidden; /* Keep from original global .collapsed */
 }
 
 /* --- 侧边栏切换按钮 --- */
 #toggleSidebarButton {
-    position: absolute;
-    /* Default for desktop, overridden by media query for mobile */
+    /* New global styles, moved from @media (max-width: 768px) */
+    position: fixed;
     top: 12px;
-    z-index: 10;
+    /* right: 12px; */ /* Default for floating style - This will be conditional based on sidebar state */
+    /* left: auto !important; */ /* Crucial to override JS if it tries to set left for old desktop style - Let JS handle this or set based on state */
+    z-index: 101; /* Higher than sidebar */
+    /* transform: none; */ /* Reset any desktop transforms if JS applied them - This might be okay, or handled by JS */
+
+    /* Retain appearance from original global */
     width: 36px;
     height: 36px;
     border-radius: 50%;
@@ -361,14 +378,12 @@ body {
     padding: 0;
     font-size: 1em;
     transition: background-color var(--transition-speed), color var(--transition-speed), transform 0.3s ease, box-shadow var(--transition-speed), left 0.3s ease, right 0.3s ease;
-    /* MODIFIED */
     box-shadow: var(--shadow-sm);
 }
 
 #toggleSidebarButton:hover {
     border-color: var(--primary-color);
     color: var(--primary-color);
-    background-color: rgba(var(--primary-rgb), 0.05);
     box-shadow: var(--shadow-md);
 }
 
@@ -489,10 +504,10 @@ a:hover {
 /* --- 输入区域样式增强 --- */
 #input-area {
     display: flex;
-    padding: 20px var(--content-padding);
+    padding: 12px var(--content-padding);
     border-top: 1px solid rgba(var(--outline-rgb), 0.1);
     flex-shrink: 0;
-    gap: 16px;
+    gap: 10px;
     align-items: flex-end;
     background-color: var(--container-bg);
     flex-wrap: wrap;
@@ -828,7 +843,7 @@ a:hover {
     cursor: pointer;
     font-size: 0.9em;
     font-weight: 500;
-    padding: 6px 14px;
+    padding: 6px 6px;
     border-radius: var(--border-radius-xl);
     transition: background-color var(--transition-speed), color var(--transition-speed), border-color var(--transition-speed);
     margin-left: auto;
@@ -1001,62 +1016,6 @@ html.dark-mode .message code:not(pre > code) {
 
 /* --- 响应式增强 --- */
 @media (max-width: 768px) {
-    :root {
-        --sidebar-width: 320px;
-        --content-padding: 16px;
-    }
-
-    body {
-        font-size: 15px;
-    }
-
-    .sidebar-panel {
-        position: fixed;
-        right: 0;
-        top: 0;
-        z-index: 100;
-        box-shadow: -2px 0 8px rgba(0, 0, 0, 0.15);
-        transform: translateX(100%);
-        /* Start collapsed (off-screen) */
-        /* transition managed by .collapsed class and JS */
-    }
-
-    .sidebar-panel:not(.collapsed) {
-        /* When open */
-        transform: translateX(0%);
-    }
-
-    /* .sidebar-panel.collapsed already handles transform: translateX(100%) implicitly by default state */
-    /* No, explicitly define collapsed for mobile if different from desktop */
-    .sidebar-panel.collapsed {
-        /* Ensure it's off-screen when collapsed on mobile */
-        transform: translateX(100%);
-        width: var(--sidebar-width);
-        /* Still maintain width for transition calculations */
-        /* padding and border are handled by the general .collapsed rule */
-    }
-
-    #toggleSidebarButton {
-        position: fixed;
-        /* Overrides desktop absolute */
-        top: 12px;
-        right: 12px;
-        left: auto !important;
-        /* Ensure JS doesn't set left */
-        z-index: 101;
-        transform: none;
-        /* Reset any desktop transforms */
-    }
-
-    .chat-panel {
-        width: 100%;
-        /* Takes full width as sidebar is overlay */
-    }
-
-    #input-area {
-        padding: 12px 16px;
-        gap: 10px;
-    }
 
     #userInput {
         min-height: 44px;
@@ -1088,9 +1047,9 @@ html.dark-mode .message code:not(pre > code) {
     }
 }
 
-@media (max-width: 480px) {
+@media (max-width: 280px) {
     body {
-        font-size: 14px;
+        font-size: 12px;
     }
 
     #chatbox {
@@ -1100,21 +1059,6 @@ html.dark-mode .message code:not(pre > code) {
 
     .message {
         padding: 12px 14px;
-    }
-
-    #input-area {
-        flex-direction: column;
-        align-items: stretch;
-        padding: 12px;
-    }
-
-    #userInput {
-        max-height: 150px;
-        flex-basis: auto;
-        /* Full width in column layout */
-        margin-bottom: 8px;
-        min-width: 0;
-        /* Reset min-width for column layout */
     }
 
     .action-button {

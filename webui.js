@@ -243,11 +243,9 @@ function updateControlsForSelectedModel() {
 function applyTheme(theme) {
     if (theme === 'dark') {
         htmlRoot.classList.add('dark-mode');
-        document.querySelector('#themeToggleButton .theme-text').textContent = '浅色';
         themeToggleButton.title = '切换到亮色模式';
     } else {
         htmlRoot.classList.remove('dark-mode');
-        document.querySelector('#themeToggleButton .theme-text').textContent = '深色';
         themeToggleButton.title = '切换到暗色模式';
     }
 }

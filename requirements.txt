@@ -13,8 +13,16 @@ uvloop ; sys_platform != "win32" # For Uvicorn performance on Linux/macOS
 playwright
 camoufox[geoip]
 
+# Security and Cryptography
+cryptography
+
 # HTTP client and other utilities
 aiohttp~=3.11.18  # CRITICAL: Using the newer version from the root project.
                  # The helper's middleware.py usage of aiohttp is likely compatible.
 requests==2.31.0
 pyjwt==2.8.0
+Flask             # Used in llm.py
+
+# Stream Proxy
+aiosocks~=0.2.6
+python-socks~=2.7.1

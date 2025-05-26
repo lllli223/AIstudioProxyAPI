@@ -1,79 +1,63 @@
-# Use Python 3.10 as the base image
-FROM python:3.10-slim
+# Dockerfile
 
-# Set working directory
+FROM python:3.10-slim-bookworm AS builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libatk1.0-0 libatk-bridge2.0-0 libcups2 libdbus-1-3 libdrm2 libgbm1 libgtk-3-0 libnspr4 libnss3 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxrender1 libxtst6 ca-certificates fonts-liberation libasound2 libpangocairo-1.0-0 libpango-1.0-0 libu2f-udev \
+    supervisor curl \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app_builder
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -U "camoufox[geoip]" && \
+    pip install --no-cache-dir -r requirements.txt
+
+FROM python:3.10-slim-bookworm
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libatk1.0-0 libatk-bridge2.0-0 libcups2 libdbus-1-3 libdrm2 libgbm1 libgtk-3-0 libnspr4 libnss3 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxrender1 libxtst6 ca-certificates fonts-liberation libasound2 libpangocairo-1.0-0 libpango-1.0-0 libu2f-udev \
+    supervisor curl \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r appgroup && useradd -r -g appgroup -s /bin/bash -d /app appuser
+
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    curl \
-    git \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /usr/local/lib/python3.10/site-packages/ /usr/local/lib/python3.10/site-packages/
+COPY --from=builder /usr/local/bin/ /usr/local/bin/
 
-# Copy requirements file
-COPY requirements.txt .
-
-# Install Python dependencies
-RUN pip install --no-cache-dir -U -r requirements.txt
-
-# Install Playwright and its dependencies
-RUN playwright install-deps firefox
-
-# Fetch Camoufox browser
-RUN camoufox fetch
-
-# Create necessary directories
-RUN mkdir -p /app/auth_profiles/active /app/logs /app/errors_py
-
-# Copy application code
 COPY . .
 
-# Create entrypoint script
-RUN echo '#!/bin/bash\n\
-set -e\n\
-\n\
-# Check if authentication files exist\n\
-if [ -z "$(ls -A /app/auth_profiles/active/*.json 2>/dev/null)" ]; then\n\
-    echo "ERROR: No authentication files found in /app/auth_profiles/active/"\n\
-    echo "Please mount a volume with your authentication files to /app/auth_profiles/active/"\n\
-    echo "Example: docker run -v /path/to/your/auth_files:/app/auth_profiles/active ..."\n\
-    exit 1\n\
-fi\n\
-\n\
-# Print startup message\n\
-echo "Starting AI Studio Proxy API..."\n\
-echo "Port: 2048"\n\
-echo "Log level: $SERVER_LOG_LEVEL"\n\
-echo "Launch mode: $LAUNCH_MODE"\n\
-\n\
-# Start the application\n\
-exec python launch_camoufox.py --headless "$@"\n\
-' > /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
+RUN camoufox fetch && \
+    python -m playwright install firefox && \
+    python -m playwright install-deps firefox
 
-# Note: Running as root to avoid permission issues with mounted volumes
-# If needed, the user can be overridden in docker-compose.yml
+RUN mkdir -p /app/logs && \
+    mkdir -p /app/auth_profiles/active && \
+    mkdir -p /app/auth_profiles/saved && \
+    mkdir -p /app/certs && \
+    mkdir -p /home/appuser/.cache/ms-playwright && \
+    mkdir -p /home/appuser/.mozilla && \
+    chown -R appuser:appgroup /app && \
+    chown -R appuser:appgroup /home/appuser
 
-# Define volumes for persistent data
-VOLUME ["/app/auth_profiles", "/app/logs", "/app/errors_py"]
+COPY supervisord.conf /etc/supervisor/conf.d/app.conf
 
-# Expose the port the app runs on
 EXPOSE 2048
+EXPOSE 3120
 
-# Set environment variables
-ENV LAUNCH_MODE=direct_debug_no_browser
-ENV SERVER_REDIRECT_PRINT=false
-ENV SERVER_LOG_LEVEL=INFO
-ENV DEBUG_LOGS_ENABLED=false
-ENV TRACE_LOGS_ENABLED=false
+USER appuser
+ENV HOME=/app
+ENV PLAYWRIGHT_BROWSERS_PATH=/home/appuser/.cache/ms-playwright
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:2048/ || exit 1
+ENV PYTHONUNBUFFERED=1
+ENV SERVER_PORT=2048
+ENV STREAM_PORT=3120
+ENV INTERNAL_CAMOUFOX_PROXY=""
 
-# Set entrypoint
-ENTRYPOINT ["/app/docker-entrypoint.sh"]
-
-# Default command (can be overridden)
-CMD []
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/app.conf"]
