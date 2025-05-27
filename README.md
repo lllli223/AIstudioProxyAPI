@@ -141,7 +141,7 @@ This project is generously sponsored by ZMTO. Visit their website: [https://zmto
 *   **多种启动模式**:
     *   **调试模式 (`--debug`)**: 启动一个带界面的浏览器，用于首次认证、调试和更新认证文件。支持保存和加载浏览器认证状态 (`auth_profiles` 目录) 实现免登录。
     *   **无头模式 (`--headless`)**: 在后台以无界面方式运行，需要预先保存的有效认证文件。
-    *   **虚拟显示无头模式 (`--virtual-display`)**: 仅限 Linux，使用 Xvfb 虚拟显示器运行无头浏览器。
+    *   **虚拟显示无头模式 (`--virtual-display`)**: 仅限 Linux，使用 Xvfb 虚拟显示器运行无头浏览器，旨在通过模拟更完整的浏览器环境来增强反指纹检测能力。
 *   **认证管理**: 强调 `auth_profiles/active/` 下的 `.json` 认证文件对无头模式的重要性，以及通过 `--debug` 模式更新认证的方法。
 *   **系统提示词与历史记录**: 支持 `messages` 中的 `system` 角色和多轮对话历史。
 *   **自动清空上下文 (条件性)**: 尝试在新对话开始时，如果当前不在 `/new_chat` 页面，则自动清空 AI Studio 页面的聊天记录。
@@ -246,6 +246,10 @@ graph TD
 *   **pip**: Python 包管理器。
 *   **(可选但推荐) Git**: 用于克隆仓库。
 *   **Google AI Studio 账号**: 并能正常访问和使用。
+*   **`xvfb` (仅当在 Linux 上使用 `--virtual-display` 模式时需要)**: X 虚拟帧缓冲器。
+    *   Debian/Ubuntu: `sudo apt-get update && sudo apt-get install -y xvfb`
+    *   Fedora: `sudo dnf install -y xorg-x11-server-Xvfb`
+    *   其他 Linux 发行版请参考其包管理器文档。
 
 ### 2. 安装
 
@@ -394,6 +398,16 @@ graph TD
 完成首次认证设置后，推荐使用 [`gui_launcher.py`](gui_launcher.py:1) 的无头模式或直接通过命令行运行 [`launch_camoufox.py --headless`](launch_camoufox.py:1) 进行日常运行。
 
 **启动器 (`launch_camoufox.py`) 说明:**
+*   **关于 `--virtual-display` (Linux 虚拟显示无头模式) 的详细说明**:
+        *   **为什么使用?** 与标准的无头模式相比，虚拟显示模式通过创建一个完整的虚拟 X 服务器环境 (Xvfb) 来运行浏览器。这可以模拟一个更真实的桌面环境，从而可能进一步降低被网站检测为自动化脚本或机器人的风险，特别适用于对反指纹和反检测有更高要求的场景，同时确保无桌面的环境下能正常运行服务
+        *   **什么时候使用?** 当您在 Linux 环境下运行，并且希望以无头模式操作。
+
+        *   **如何使用?**
+            1.  确保您的 Linux 系统已安装 `xvfb` (参见 [先决条件](#1-先决条件) 中的安装说明)。
+            2.  在运行 [`launch_camoufox.py`](launch_camoufox.py:1) 时添加 `--virtual-display` 标志。例如:
+                ```bash
+                python launch_camoufox.py --virtual-display --server-port 2048 --stream-port 3120 --internal-camoufox-proxy ''
+                ```
 
 在需要进行配置、测试、调试或更新认证文件时，或者当您偏好命令行操作并需要细致控制启动参数时，**推荐优先直接使用 [`launch_camoufox.py`](launch_camoufox.py:1) 脚本启动**。这是项目的基础启动方式，提供了更详细的控制和日志输出。
 
@@ -650,6 +664,7 @@ python launch_camoufox.py --debug --server-port 2048 --stream-port 3120 --helper
     *   使用 `source venv/bin/activate` 激活虚拟环境。
     *   `playwright install-deps firefox` 可能需要系统包管理器（如 `apt` for Debian/Ubuntu, `yum`/`dnf` for Fedora/CentOS, `brew` for macOS）安装一些依赖库。如果命令失败，请仔细阅读错误输出，根据提示安装缺失的系统包。有时可能需要 `sudo` 权限执行 `playwright install-deps`。
     *   防火墙通常不会阻止本地访问，但如果从其他机器访问，需要确保端口（默认 2048）是开放的。
+*   对于Linux 用户，可以考虑使用 `--virtual-display` 标志启动 (需要预先安装 `xvfb`)，它会利用 Xvfb 创建一个虚拟显示环境来运行浏览器，这可能有助于进一步降低被检测的风险和保证网页正常对话。
 
 *   **Windows**:
     *   **原生 Windows**:
