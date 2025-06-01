@@ -2096,6 +2096,7 @@ async def _process_request_refactored(
     disconnect_check_task = None
     input_field_locator = page.locator(INPUT_SELECTOR) if page else None # Handle page=None
     submit_button_locator = page.locator(SUBMIT_BUTTON_SELECTOR) if page else None # Handle page=None
+    autosize_wrapper_locator = page.locator('ms-prompt-input-wrapper ms-autosize-textarea') if page else None # 定义 autosize_wrapper_locator
 
     async def check_disconnect_periodically():
         while not client_disconnected_event.is_set():
@@ -2494,39 +2495,196 @@ async def _process_request_refactored(
                             logger.warning(f"[{req_id}] (use_stream=True, Full Sync) 等待“清空聊天”按钮可用失败: {e_enable}。")
                     check_client_disconnected("清空聊天 (use_stream=True, Full Sync) - 可用性检查后: ")
                     if can_attempt_clear:
-                        # [ 此处省略了清空聊天内部的详细 try-except 和日志，以保持简洁，实际应完整保留 ]
-                        # 简化版：
-                        await clear_chat_button_locator.click(timeout=CLICK_TIMEOUT_MS)
-                        await expect_async(overlay_locator).to_be_visible(timeout=WAIT_FOR_ELEMENT_TIMEOUT_MS)
-                        await confirm_button_locator.click(timeout=CLICK_TIMEOUT_MS)
-                        await expect_async(confirm_button_locator).to_be_hidden(timeout=CLEAR_CHAT_VERIFY_TIMEOUT_MS)
-                        await expect_async(overlay_locator).to_be_hidden(timeout=1000)
+                        # --- START: 完整的“清空聊天”逻辑块 (用于 use_stream=True, Full Sync 路径) ---
+                        overlay_initially_visible = False
+                        try:
+                            if await overlay_locator.is_visible(timeout=1000): # Short timeout for initial check
+                                overlay_initially_visible = True
+                                logger.info(f"[{req_id}] (use_stream=True, Full Sync) 清空聊天确认遮罩层已可见。直接点击“继续”。")
+                        except TimeoutError:
+                            logger.info(f"[{req_id}] (use_stream=True, Full Sync) 清空聊天确认遮罩层初始不可见 (检查超时或未找到)。")
+                            overlay_initially_visible = False
+                        except Exception as e_vis_check:
+                            logger.warning(f"[{req_id}] (use_stream=True, Full Sync) 检查遮罩层可见性时发生错误: {e_vis_check}。假定不可见。")
+                            overlay_initially_visible = False
+                        
+                        check_client_disconnected("清空聊天 (use_stream=True, Full Sync) - 初始遮罩层检查后: ")
+
+                        if overlay_initially_visible:
+                            logger.info(f"[{req_id}] (use_stream=True, Full Sync) 点击“继续”按钮 (遮罩层已存在): {CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR}")
+                            await confirm_button_locator.click(timeout=CLICK_TIMEOUT_MS)
+                        else:
+                            logger.info(f"[{req_id}] (use_stream=True, Full Sync) 点击“清空聊天”按钮: {CLEAR_CHAT_BUTTON_SELECTOR}")
+                            await clear_chat_button_locator.click(timeout=CLICK_TIMEOUT_MS)
+                            check_client_disconnected("清空聊天 (use_stream=True, Full Sync) - 点击“清空聊天”后: ")
+                            try:
+                                logger.info(f"[{req_id}] (use_stream=True, Full Sync) 等待清空聊天确认遮罩层出现: {OVERLAY_SELECTOR}")
+                                await expect_async(overlay_locator).to_be_visible(timeout=WAIT_FOR_ELEMENT_TIMEOUT_MS)
+                                logger.info(f"[{req_id}] (use_stream=True, Full Sync) 清空聊天确认遮罩层已出现。")
+                            except TimeoutError:
+                                error_msg = f"等待清空聊天确认遮罩层超时 (点击清空按钮后)。请求 ID: {req_id}"
+                                logger.error(f"[{req_id}] (use_stream=True, Full Sync) {error_msg}")
+                                await save_error_snapshot(f"clear_chat_overlay_timeout_usfs_{req_id}") # usfs: use_stream_full_sync
+                                raise PlaywrightAsyncError(error_msg) # Propagate to page_sync_err handling
+                            
+                        check_client_disconnected("清空聊天 (use_stream=True, Full Sync) - 遮罩层出现后 / 点击“继续”(已存在遮罩)后: ")
+                        if not overlay_initially_visible: # 如果遮罩不是初始可见，则需要点击“继续”
+                            logger.info(f"[{req_id}] (use_stream=True, Full Sync) 点击“继续”按钮 (在对话框中): {CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR}")
+                            await confirm_button_locator.click(timeout=CLICK_TIMEOUT_MS)
+                        
+                        check_client_disconnected("清空聊天 (use_stream=True, Full Sync) - 点击“继续”后: ")
+
+                        max_retries_disappear = 3
+                        for attempt_disappear in range(max_retries_disappear):
+                            try:
+                                logger.info(f"[{req_id}] (use_stream=True, Full Sync) 等待清空聊天确认按钮/对话框消失 (尝试 {attempt_disappear + 1}/{max_retries_disappear})...")
+                                await expect_async(confirm_button_locator).to_be_hidden(timeout=CLEAR_CHAT_VERIFY_TIMEOUT_MS)
+                                await expect_async(overlay_locator).to_be_hidden(timeout=1000) # Shorter timeout for overlay after confirm button
+                                logger.info(f"[{req_id}] (use_stream=True, Full Sync) ✅ 清空聊天确认对话框已成功消失。")
+                                break
+                            except TimeoutError:
+                                logger.warning(f"[{req_id}] (use_stream=True, Full Sync) ⚠️ 等待清空聊天确认对话框消失超时 (尝试 {attempt_disappear + 1}/{max_retries_disappear})。")
+                                if attempt_disappear < max_retries_disappear - 1:
+                                    confirm_still_visible = False; overlay_still_visible = False
+                                    try: confirm_still_visible = await confirm_button_locator.is_visible(timeout=200)
+                                    except: pass
+                                    try: overlay_still_visible = await overlay_locator.is_visible(timeout=200)
+                                    except: pass
+                                    if confirm_still_visible: logger.warning(f"[{req_id}] (use_stream=True, Full Sync) 确认按钮在点击和等待后仍可见。")
+                                    if overlay_still_visible: logger.warning(f"[{req_id}] (use_stream=True, Full Sync) 遮罩层在点击和等待后仍可见。")
+                                    await asyncio.sleep(1.0)
+                                    check_client_disconnected(f"清空聊天 (use_stream=True, Full Sync) - 重试消失检查 {attempt_disappear + 1} 前: ")
+                                    continue
+                                else:
+                                    error_msg = f"达到最大重试次数。清空聊天确认对话框未消失。请求 ID: {req_id}"
+                                    logger.error(f"[{req_id}] (use_stream=True, Full Sync) {error_msg}")
+                                    await save_error_snapshot(f"clear_chat_dialog_disappear_timeout_usfs_{req_id}")
+                                    raise PlaywrightAsyncError(error_msg) # Propagate
+                            check_client_disconnected(f"清空聊天 (use_stream=True, Full Sync) - 消失检查尝试 {attempt_disappear + 1} 后: ")
+                        
                         last_response_container = page.locator(RESPONSE_CONTAINER_SELECTOR).last
-                        await asyncio.sleep(0.5)
-                        await expect_async(last_response_container).to_be_hidden(timeout=CLEAR_CHAT_VERIFY_TIMEOUT_MS - 500)
-                        logger.info(f"[{req_id}] (use_stream=True, Full Sync) ✅ 聊天已成功清空。")
-                    # --- END: 粘贴的“清空聊天”逻辑块 ---
+                        await asyncio.sleep(0.5) # Short delay before final verification
+                        check_client_disconnected("清空聊天 (use_stream=True, Full Sync) - 最终验证前延时后: ")
+                        try:
+                            await expect_async(last_response_container).to_be_hidden(timeout=CLEAR_CHAT_VERIFY_TIMEOUT_MS - 500)
+                            logger.info(f"[{req_id}] (use_stream=True, Full Sync) ✅ 聊天已成功清空 (验证通过 - 最后响应容器隐藏)。")
+                        except Exception as verify_err:
+                            logger.warning(f"[{req_id}] (use_stream=True, Full Sync) ⚠️ 警告: 清空聊天验证失败 (最后响应容器未隐藏): {verify_err}")
+                            # Do not raise here for use_stream path, allow process to continue if aux stream is primary
+                    else: # if not can_attempt_clear
+                        if not ('/prompts/new_chat' in page.url.rstrip('/')):
+                            logger.warning(f"[{req_id}] (use_stream=True, Full Sync) 由于“清空聊天”按钮初始不可用，未执行清空操作。")
+                    # --- END: 完整的“清空聊天”逻辑块 ---
                 else: # is_incremental_page_update is True
                     logger.info(f"[{req_id}] (use_stream=True, Incremental) 跳过清空聊天记录。")
 
                 logger.info(f"[{req_id}] (use_stream=True) 填充并提交页面提示 ({len(prompt_to_send_to_page)} chars)...")
-                # --- START: 粘贴的“填充并提交用户提示”逻辑块 (使用 prompt_to_send_to_page) ---
-                prompt_textarea_locator_sync = page.locator(PROMPT_TEXTAREA_SELECTOR)
-                autosize_wrapper_locator_sync = page.locator('ms-prompt-input-wrapper ms-autosize-textarea')
-                await expect_async(prompt_textarea_locator_sync).to_be_visible(timeout=5000)
-                check_client_disconnected("页面同步 - 输入框可见后: ")
-                await prompt_textarea_locator_sync.evaluate(
-                    '(element, text) => { element.value = text; element.dispatchEvent(new Event("input", { bubbles: true })); }',
-                    prompt_to_send_to_page
+                # --- START: 完整的“填充并提交用户提示”逻辑块 (用于 use_stream=True 路径, 使用 prompt_to_send_to_page) ---
+                # input_field_locator, autosize_wrapper_locator, and submit_button_locator are defined in the outer scope of _process_request_refactored
+                await expect_async(input_field_locator).to_be_visible(timeout=5000) # 使用 input_field_locator
+                check_client_disconnected("页面同步 (use_stream=True) - 输入框可见后: ")
+                logger.info(f"[{req_id}] (use_stream=True)   - 使用 JavaScript evaluate 填充提示文本...")
+                await input_field_locator.evaluate( # 使用 input_field_locator
+                    '''
+                    (element, text) => {
+                        element.value = text;
+                        element.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+                        element.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+                    }
+                    ''',
+                    prompt_to_send_to_page # 使用 prompt_to_send_to_page
                 )
-                await autosize_wrapper_locator_sync.evaluate('(element, text) => { element.setAttribute("data-value", text); }', prompt_to_send_to_page)
-                check_client_disconnected("页面同步 - JS填充后: ")
+                # autosize_wrapper_locator is page.locator('ms-prompt-input-wrapper ms-autosize-textarea')
+                await autosize_wrapper_locator.evaluate('(element, text) => { element.setAttribute("data-value", text); }', prompt_to_send_to_page)
+                logger.info(f"[{req_id}] (use_stream=True)   - JavaScript evaluate 填充完成，data-value 已尝试更新。")
+                check_client_disconnected("页面同步 (use_stream=True) - JS填充后: ")
+
+                logger.info(f"[{req_id}] (use_stream=True)   - 等待发送按钮启用 (填充提示后)...")
+                wait_timeout_ms_submit_enabled = 40000 # 40 seconds
+                try:
+                    check_client_disconnected("页面同步 (use_stream=True) - 填充提示后等待发送按钮启用 - 前置检查: ")
+                    await expect_async(submit_button_locator).to_be_enabled(timeout=wait_timeout_ms_submit_enabled)
+                    logger.info(f"[{req_id}] (use_stream=True)   - ✅ 发送按钮已启用。")
+                except PlaywrightAsyncError as e_pw_enabled:
+                    logger.error(f"[{req_id}] (use_stream=True)   - ❌ 等待发送按钮启用超时或错误: {e_pw_enabled}")
+                    await save_error_snapshot(f"submit_button_enable_timeout_us_{req_id}") # us: use_stream
+                    raise # Propagate to page_sync_err handling
                 
-                # 简化版提交，实际应完整保留快捷键提交逻辑
-                await expect_async(submit_button_locator).to_be_enabled(timeout=40000)
-                await submit_button_locator.click(timeout=CLICK_TIMEOUT_MS) # 使用直接点击作为简化
-                logger.info(f"[{req_id}] (use_stream=True) ✅ 页面提示已提交。")
-                # --- END: 粘贴的“填充并提交用户提示”逻辑块 ---
+                check_client_disconnected("页面同步 (use_stream=True) - 发送按钮启用后 (等待后): ")
+                await asyncio.sleep(0.3) 
+                check_client_disconnected("页面同步 (use_stream=True) - 提交前延时后: ")
+                submitted_successfully_via_shortcut = False
+                # user_prompt_autosize_locator = page.locator('ms-prompt-input-wrapper ms-autosize-textarea').nth(1) # This was for a specific validation, might not be needed or adapt
+                logger.info(f"[{req_id}] (use_stream=True)   - 尝试通过快捷键提交...")
+                try:
+                    host_os_from_launcher = os.environ.get('HOST_OS_FOR_SHORTCUT')
+                    is_mac_determined = False
+                    if host_os_from_launcher:
+                        logger.info(f"[{req_id}] (use_stream=True)   - 从启动器环境变量 HOST_OS_FOR_SHORTCUT 获取到操作系统提示: '{host_os_from_launcher}'")
+                        if host_os_from_launcher == "Darwin": is_mac_determined = True
+                        elif host_os_from_launcher in ["Windows", "Linux"]: is_mac_determined = False
+                        else: host_os_from_launcher = None # Fallback if unknown
+                    if not host_os_from_launcher:
+                        user_agent_data_platform = await page.evaluate("() => navigator.userAgentData?.platform || ''")
+                        if user_agent_data_platform:
+                            is_mac_determined = "mac" in user_agent_data_platform.lower()
+                        else: # Fallback to userAgent string if userAgentData not available
+                            user_agent_string = await page.evaluate("() => navigator.userAgent || ''")
+                            is_mac_determined = "macintosh" in user_agent_string.lower() or \
+                                                "mac os x" in user_agent_string.lower() or \
+                                                "macintel" in user_agent_string.lower()
+                        logger.info(f"[{req_id}] (use_stream=True)   - 浏览器内部检测平台: '{user_agent_data_platform or user_agent_string}', 推断 is_mac: {is_mac_determined}")
+                    
+                    shortcut_modifier = "Meta" if is_mac_determined else "Control"
+                    shortcut_key = "Enter"
+                    logger.info(f"[{req_id}] (use_stream=True)   - 最终选择快捷键: {shortcut_modifier}+{shortcut_key}")
+                    await input_field_locator.focus(timeout=5000) # 使用 input_field_locator
+                    check_client_disconnected("页面同步 (use_stream=True) - 输入框获取焦点后 (快捷键): ")
+                    await asyncio.sleep(0.1)
+                    try:
+                        await page.keyboard.press(f'{shortcut_modifier}+{shortcut_key}')
+                        logger.info(f"[{req_id}] (use_stream=True)   - 已使用组合键方式模拟按下: {shortcut_modifier}+{shortcut_key}")
+                    except Exception as combo_err:
+                        logger.warning(f"[{req_id}] (use_stream=True)   - 组合键方式失败: {combo_err}，尝试分步按键...")
+                        await page.keyboard.down(shortcut_modifier); await asyncio.sleep(0.05)
+                        await page.keyboard.down(shortcut_key); await asyncio.sleep(0.05)
+                        await page.keyboard.up(shortcut_key); await asyncio.sleep(0.05)
+                        await page.keyboard.up(shortcut_modifier)
+                        logger.info(f"[{req_id}] (use_stream=True)   - 已使用分步按键方式模拟: {shortcut_modifier}+{shortcut_key}")
+                    
+                    check_client_disconnected("页面同步 (use_stream=True) - 按下键盘后: ")
+                    await asyncio.sleep(0.75)
+                    check_client_disconnected("页面同步 (use_stream=True) - 按下键盘后延时后: ")
+                    
+                    user_prompt_actual_textarea_locator = page.locator('ms-prompt-input-wrapper textarea[aria-label="Start typing a prompt"]')
+                    validation_attempts = 7; validation_interval = 0.2
+                    for i in range(validation_attempts):
+                        current_value = await user_prompt_actual_textarea_locator.input_value(timeout=500)
+                        if current_value == "":
+                            submitted_successfully_via_shortcut = True
+                            logger.info(f"[{req_id}] (use_stream=True)   - ✅ 快捷键提交成功确认 (用户输入 textarea value 已清空 after {i+1} attempts)。")
+                            break
+                        if i < validation_attempts - 1: await asyncio.sleep(validation_interval)
+                    if not submitted_successfully_via_shortcut:
+                        final_value_for_log = await user_prompt_actual_textarea_locator.input_value(timeout=300)
+                        logger.warning(f"[{req_id}] (use_stream=True)   - ⚠️ 快捷键提交后用户输入 textarea value ('{final_value_for_log}') 未在预期时间内清空。")
+                except Exception as shortcut_err:
+                    logger.error(f"[{req_id}] (use_stream=True)   - ❌ 快捷键提交过程中发生错误: {shortcut_err}", exc_info=True)
+                    await save_error_snapshot(f"shortcut_submit_error_us_{req_id}")
+                    # Do not raise for use_stream, but log as error. Submission might still have worked.
+                
+                if not submitted_successfully_via_shortcut:
+                     logger.warning(f"[{req_id}] (use_stream=True) 未能通过快捷键确认提交。将尝试直接点击提交按钮作为后备。")
+                     try:
+                         await expect_async(submit_button_locator).to_be_enabled(timeout=5000) # Re-check if still enabled
+                         await submit_button_locator.click(timeout=CLICK_TIMEOUT_MS)
+                         logger.info(f"[{req_id}] (use_stream=True)   - ✅ 通过直接点击提交按钮作为后备已执行。")
+                     except Exception as click_fallback_err:
+                         logger.error(f"[{req_id}] (use_stream=True)   - ❌ 直接点击提交按钮作为后备也失败: {click_fallback_err}")
+                         raise PlaywrightAsyncError(f"Failed to submit prompt via shortcut and fallback click: {click_fallback_err}") from click_fallback_err
+                
+                logger.info(f"[{req_id}] (use_stream=True) ✅ 页面提示已提交 (通过快捷键或后备点击)。")
+                # --- END: 完整的“填充并提交用户提示”逻辑块 ---
 
                 async with page_sync_cache_lock:
                     last_api_messages_synced_to_page = [msg.model_copy(deep=True) for msg in request.messages]
