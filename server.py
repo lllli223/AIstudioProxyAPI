@@ -99,6 +99,8 @@ DEFAULT_FALLBACK_MODEL_ID = "no model list"
 
 # --- Selectors ---
 PROMPT_TEXTAREA_SELECTOR = 'ms-prompt-input-wrapper ms-autosize-textarea textarea'
+SYSTEM_INSTRUCTIONS_BUTTON_SELECTOR = 'button[data-test-si][aria-label="System instructions"]'
+SYSTEM_INSTRUCTIONS_TEXTAREA_SELECTOR = 'textarea[placeholder="Optional tone and style instructions for the model"].toolbar-expand-textarea'
 INPUT_SELECTOR = PROMPT_TEXTAREA_SELECTOR
 INPUT_SELECTOR2 = PROMPT_TEXTAREA_SELECTOR
 SUBMIT_BUTTON_SELECTOR = 'button[aria-label="Run"].run-button'
@@ -346,101 +348,132 @@ class ClientDisconnectedError(Exception):
     pass
 
 # --- Helper Functions ---
-def prepare_combined_prompt(messages: List[Message], req_id: str) -> str:
-    # Using logger instead of print
-    logger.info(f"[{req_id}] (准备提示) 正在从 {len(messages)} 条消息准备组合提示 (包括历史)。")
+def prepare_combined_prompt(messages: List[Message], req_id: str) -> Tuple[Optional[str], str]:
+    logger.info(f"[{req_id}] (准备提示) 正在从 {len(messages)} 条消息准备组合提示和提取系统提示。")
     combined_parts = []
     system_prompt_content: Optional[str] = None
-    processed_system_message_indices: Set[int] = set()
+    first_system_message_index = -1
+
+    # 寻找第一个系统消息并提取其内容
     for i, msg in enumerate(messages):
         if msg.role == 'system':
             if isinstance(msg.content, str) and msg.content.strip():
                 system_prompt_content = msg.content.strip()
-                processed_system_message_indices.add(i)
-                logger.info(f"[{req_id}] (准备提示) 在索引 {i} 找到并使用系统提示: '{system_prompt_content[:80]}...'")
-                system_instr_prefix = "系统指令:\n"
-                combined_parts.append(f"{system_instr_prefix}{system_prompt_content}")
+                logger.info(f"[{req_id}] (准备提示) 在索引 {i} 找到并提取系统提示: '{system_prompt_content[:80]}...'")
             else:
-                logger.info(f"[{req_id}] (准备提示) 在索引 {i} 忽略非字符串或空的系统消息。")
-                processed_system_message_indices.add(i)
-            break
-    role_map_ui = {"user": "用户", "assistant": "助手", "system": "系统", "tool": "工具"}
+                # 如果系统消息内容为空或非字符串，则视为无有效系统提示，将用空字符串表示清空
+                logger.info(f"[{req_id}] (准备提示) 在索引 {i} 找到系统消息，但内容为空或非字符串，系统提示将为空字符串。")
+                system_prompt_content = "" # 表示清空
+            first_system_message_index = i
+            break # 只处理第一个系统消息
+
+    role_map_ui = {"user": "用户", "assistant": "助手", "tool": "工具"} # "system" 角色不再在这里处理
     turn_separator = "\n---\n"
+
+    # 组合用户和助手消息
     for i, msg in enumerate(messages):
-        if i in processed_system_message_indices:
+        if i == first_system_message_index: # 跳过已处理的系统消息
             continue
-        if msg.role == 'system':
-            logger.info(f"[{req_id}] (准备提示) 跳过在索引 {i} 的后续系统消息。")
+        if msg.role == 'system': # 跳过所有其他系统消息
+            logger.info(f"[{req_id}] (准备提示) 跳过在索引 {i} 的系统消息 (主提示组合阶段)。")
             continue
-        if combined_parts:
+
+        if combined_parts: # 在角色之间添加分隔符，但不是在最开始
             combined_parts.append(turn_separator)
+
         role_prefix_ui = f"{role_map_ui.get(msg.role, msg.role.capitalize())}:\n"
         current_turn_parts = [role_prefix_ui]
         content_str = ""
+
         if isinstance(msg.content, str):
             content_str = msg.content.strip()
-        elif isinstance(msg.content, list):
+        elif isinstance(msg.content, list): # 处理 content 是列表的情况 (例如多模态消息)
             text_parts = []
             for item_model in msg.content:
-                if isinstance(item_model, dict):
+                if isinstance(item_model, dict): # 兼容旧的 dict 格式
                     item_type = item_model.get('type')
                     if item_type == 'text' and isinstance(item_model.get('text'), str):
                         text_parts.append(item_model['text'])
                     else:
-                        logger.warning(f"[{req_id}] (准备提示) 警告: 在索引 {i} 的消息中忽略非文本或未知类型的 content item: 类型={item_type}")
-                elif isinstance(item_model, MessageContentItem):
+                        logger.warning(f"[{req_id}] (准备提示) 警告: 在索引 {i} 的消息中忽略非文本或未知类型的 dict content item: 类型={item_type}")
+                elif isinstance(item_model, MessageContentItem): # 处理 Pydantic 模型
                     if item_model.type == 'text' and isinstance(item_model.text, str):
                         text_parts.append(item_model.text)
                     else:
-                        logger.warning(f"[{req_id}] (准备提示) 警告: 在索引 {i} 的消息中忽略非文本或未知类型的 content item: 类型={item_model.type}")
+                        logger.warning(f"[{req_id}] (准备提示) 警告: 在索引 {i} 的消息中忽略非文本或未知类型的 MessageContentItem: 类型={item_model.type}")
             content_str = "\n".join(text_parts).strip()
         elif msg.content is None and msg.role == 'assistant' and hasattr(msg, 'tool_calls') and msg.tool_calls:
-            pass
+            pass # 允许助手消息只有工具调用而无文本内容
         elif msg.content is None and msg.role == 'tool':
              logger.warning(f"[{req_id}] (准备提示) 警告: 角色 'tool' 在索引 {i} 的 content 为 None，这通常不符合预期。")
-        else:
+        else: # 其他意外情况
             logger.warning(f"[{req_id}] (准备提示) 警告: 角色 {msg.role} 在索引 {i} 的内容类型意外 ({type(msg.content)}) 或为 None。将尝试转换为空字符串。")
             content_str = str(msg.content or "").strip()
+
         if content_str:
             current_turn_parts.append(content_str)
+
+        # 处理工具调用 (主要用于助手消息)
         if msg.role == 'assistant' and hasattr(msg, 'tool_calls') and msg.tool_calls:
-            if content_str:
+            if content_str: # 如果已有文本内容，在工具调用前加换行
                 current_turn_parts.append("\n")
             tool_call_visualizations = []
-            if msg.tool_calls:
+            if msg.tool_calls: # 确保 tool_calls 存在且非空
                 for tool_call in msg.tool_calls:
+                    # 兼容字典和 Pydantic 模型表示的 tool_call
+                    func_name, formatted_args = None, "{}"
                     if isinstance(tool_call, dict) and tool_call.get('type') == 'function':
-                        function_call = tool_call.get('function')
-                        if isinstance(function_call, dict):
-                            func_name = function_call.get('name')
-                            func_args_str = function_call.get('arguments')
+                        function_call_dict = tool_call.get('function')
+                        if isinstance(function_call_dict, dict):
+                            func_name = function_call_dict.get('name')
+                            func_args_str = function_call_dict.get('arguments')
                             try:
                                 parsed_args = json.loads(func_args_str if func_args_str else '{}')
                                 formatted_args = json.dumps(parsed_args, indent=2, ensure_ascii=False)
                             except (json.JSONDecodeError, TypeError):
                                 formatted_args = func_args_str if func_args_str is not None else "{}"
-                            tool_call_visualizations.append(
-                                f"请求调用函数: {func_name}\n参数:\n{formatted_args}"
-                            )
+                    elif isinstance(tool_call, ToolCall) and tool_call.type == 'function':
+                        func_name = tool_call.function.name
+                        try:
+                            parsed_args = json.loads(tool_call.function.arguments or '{}')
+                            formatted_args = json.dumps(parsed_args, indent=2, ensure_ascii=False)
+                        except (json.JSONDecodeError, TypeError):
+                            formatted_args = tool_call.function.arguments or "{}"
+                    
+                    if func_name:
+                        tool_call_visualizations.append(
+                            f"请求调用函数: {func_name}\n参数:\n{formatted_args}"
+                        )
             if tool_call_visualizations:
                 current_turn_parts.append("\n".join(tool_call_visualizations))
+        
+        # 处理工具消息的名称和ID (如果适用)
         if msg.role == 'tool' and hasattr(msg, 'tool_call_id') and msg.tool_call_id:
-            if hasattr(msg, 'name') and msg.name and content_str:
-                pass
-            elif not content_str:
-                 logger.warning(f"[{req_id}] (准备提示) 警告: 角色 'tool' (ID: {msg.tool_call_id}, Name: {getattr(msg, 'name', 'N/A')}) 在索引 {i} 的 content 为空，这通常表示函数执行无字符串输出或结果未提供。")
-        if len(current_turn_parts) > 1 or (msg.role == 'assistant' and hasattr(msg, 'tool_calls') and msg.tool_calls):
+            if hasattr(msg, 'name') and msg.name and content_str: # 有名称和内容
+                pass # 内容已在上面处理
+            elif not content_str: # 无内容
+                 logger.warning(f"[{req_id}] (准备提示) 警告: 角色 'tool' (ID: {msg.tool_call_id}, Name: {getattr(msg, 'name', 'N/A')}) 在索引 {i} 的 content 为空。")
+
+        # 添加当前轮次到主提示 (如果非空)
+        if len(current_turn_parts) > 1 or (msg.role == 'assistant' and hasattr(msg, 'tool_calls') and msg.tool_calls): # 有内容或有工具调用
             combined_parts.append("".join(current_turn_parts))
-        elif not combined_parts and not current_turn_parts:
+        elif not combined_parts and not current_turn_parts: # 跳过完全空的第一条消息
             logger.info(f"[{req_id}] (准备提示) 跳过角色 {msg.role} 在索引 {i} 的空消息 (且无工具调用)。")
-        elif len(current_turn_parts) == 1 and not combined_parts:
+        elif len(current_turn_parts) == 1 and not combined_parts: # 跳过只有前缀的第一条消息
              logger.info(f"[{req_id}] (准备提示) 跳过角色 {msg.role} 在索引 {i} 的空消息 (只有前缀)。")
-    final_prompt = "".join(combined_parts)
-    if final_prompt:
-        final_prompt += "\n"
-    preview_text = final_prompt[:300].replace('\n', '\\n')
-    logger.info(f"[{req_id}] (准备提示) 组合提示长度: {len(final_prompt)}。预览: '{preview_text}...'")
-    return final_prompt
+
+    final_user_assistant_prompt = "".join(combined_parts)
+    if final_user_assistant_prompt: # 只为用户/助手提示添加结尾换行
+        final_user_assistant_prompt += "\n"
+
+    preview_text = final_user_assistant_prompt[:300].replace('\n', '\\n')
+    logger.info(f"[{req_id}] (准备提示) 组合的用户/助手提示长度: {len(final_user_assistant_prompt)}。预览: '{preview_text}...'")
+    if system_prompt_content is not None: # 即使是空字符串也记录
+        logger.info(f"[{req_id}] (准备提示) 提取的系统提示 (长度 {len(system_prompt_content)}): '{system_prompt_content[:80] if system_prompt_content else '[空字符串]'}'")
+    else:
+        logger.info(f"[{req_id}] (准备提示) 未提取到系统提示 (将为 None)。")
+        
+    return system_prompt_content, final_user_assistant_prompt
 
 def validate_chat_request(messages: List[Message], req_id: str) -> Dict[str, Optional[str]]:
     if not messages:
@@ -449,6 +482,88 @@ def validate_chat_request(messages: List[Message], req_id: str) -> Dict[str, Opt
         raise ValueError(f"[{req_id}] 无效请求: 未找到用户或助手消息。")
     logger.info(f"[{req_id}] (校验) 对 {len(messages)} 条消息的基本校验通过。")
     return {}
+
+async def set_system_prompt_in_page(
+    page: AsyncPage,
+    system_prompt: str,
+    req_id: str,
+    check_client_disconnected: Callable
+):
+    """设置页面上的系统提示词，使用缓存避免不必要的交互。"""
+    normalized_current_prompt = system_prompt if system_prompt is not None else ""
+
+    # 此函数在 params_cache_lock 外部被调用，但其内部逻辑应在 params_cache_lock 内执行
+    # 为确保安全，这里再次获取锁，或者依赖调用方已获取锁。
+    # 鉴于此函数可能被多处调用，内部获取锁更安全。
+    # async with params_cache_lock: # 移除此处的锁，依赖外部调用时已获取
+    cached_system_prompt = page_params_cache.get("system_prompt")
+
+    if cached_system_prompt is not None and cached_system_prompt == normalized_current_prompt:
+        logger.info(f"[{req_id}] 系统提示 ('{normalized_current_prompt[:30]}...') 与缓存值一致。跳过页面交互。")
+        return
+
+    logger.info(f"[{req_id}] 尝试设置系统提示 (长度 {len(normalized_current_prompt)}): '{normalized_current_prompt[:80]}...'")
+
+    open_button_locator = page.locator(SYSTEM_INSTRUCTIONS_BUTTON_SELECTOR).first
+    textarea_locator = page.locator(SYSTEM_INSTRUCTIONS_TEXTAREA_SELECTOR).first
+
+    try:
+        check_client_disconnected("系统提示 - 开始设置前: ")
+
+        # 检查文本框是否已可见
+        # 使用 is_visible() 而不是 expect().to_be_visible() 来避免在元素不存在时抛出 AssertionError
+        # is_visible() 在元素不存在时会快速返回 False (在超时内)
+        if await textarea_locator.is_visible(timeout=1000): # 短暂超时检查，如果它已经在了
+            logger.info(f"[{req_id}] 系统提示文本框已可见。")
+        else:
+            logger.info(f"[{req_id}] 系统提示文本框初始不可见或不存在，尝试点击打开按钮...")
+            await expect_async(open_button_locator).to_be_visible(timeout=CLICK_TIMEOUT_MS)
+            check_client_disconnected("系统提示 - 打开按钮可见后: ")
+            await open_button_locator.click(timeout=CLICK_TIMEOUT_MS)
+            check_client_disconnected("系统提示 - 点击打开按钮后: ")
+            # 点击后，再断言文本框变得可见
+            await expect_async(textarea_locator).to_be_visible(timeout=CLICK_TIMEOUT_MS)
+            logger.info(f"[{req_id}] 系统提示文本框已打开/可见。")
+                # 填充文本框
+        await textarea_locator.fill(normalized_current_prompt, timeout=CLICK_TIMEOUT_MS)
+        check_client_disconnected("系统提示 - 填充文本框后: ")
+        
+        # 验证填充是否成功
+        filled_value = await textarea_locator.input_value(timeout=2000)
+        check_client_disconnected("系统提示 - 读取填充值后: ")
+
+        if filled_value == normalized_current_prompt:
+            logger.info(f"[{req_id}] ✅ 系统提示已成功设置为 (长度 {len(normalized_current_prompt)}): '{normalized_current_prompt[:80]}...'")
+            page_params_cache["system_prompt"] = normalized_current_prompt # 更新缓存
+        else:
+            logger.warning(f"[{req_id}] ⚠️ 系统提示填充后验证失败。期望: '{normalized_current_prompt[:80]}...', 实际: '{filled_value[:80]}...'. 缓存未更新。")
+            await save_error_snapshot(f"system_prompt_fill_verify_fail_{req_id}")
+            # 不更新缓存，以便下次重试或让错误更明显
+            
+    except TimeoutError as e: # Playwright 的操作超时通常是 TimeoutError (playwright.sync_api.Error 的子类)
+        logger.error(f"[{req_id}] 操作超时: {e}")
+        # 根据需要处理超时，可能需要 check_client_disconnected
+        check_client_disconnected(f"系统提示 - 超时后 ({e}): ")
+        raise # 重新抛出异常或进行其他错误处理
+    except Exception as e:
+        logger.error(f"[{req_id}] ❌ 设置系统提示时发生未知错误: {e}", exc_info=True) # exc_info=True 会记录 traceback
+        check_client_disconnected(f"系统提示 - 发生未知错误后 ({e}): ")
+        raise # 重新抛出异常或进行其他错误处理
+        
+    except ClientDisconnectedError:
+        logger.info(f"[{req_id}] 客户端在设置系统提示时断开连接。")
+        page_params_cache.pop("system_prompt", None) # 清除缓存，因为操作未完成
+        raise
+    except PlaywrightAsyncError as pw_err:
+        logger.error(f"[{req_id}] ❌ 操作页面设置系统提示时发生Playwright错误: {pw_err}")
+        page_params_cache.pop("system_prompt", None) # 出错时清除缓存
+        await save_error_snapshot(f"system_prompt_playwright_error_{req_id}")
+        # 不向上抛出，允许主流程继续，但系统提示可能未按预期设置
+    except Exception as e:
+        logger.exception(f"[{req_id}] ❌ 设置系统提示时发生未知错误")
+        page_params_cache.pop("system_prompt", None) # 出错时清除缓存
+        await save_error_snapshot(f"system_prompt_unknown_error_{req_id}")
+        # 同上，不向上抛出
 
 async def get_raw_text_content(response_element: Locator, previous_text: str, req_id: str) -> str:
     raw_text = previous_text
@@ -2019,10 +2134,13 @@ async def _process_request_refactored(
                     page_params_cache["last_known_model_id_for_params"] = current_ai_studio_model_id
             else:
                 logger.debug(f"[{req_id}] Parameter cache for model '{cached_model_for_params}' remains valid (current model: '{current_ai_studio_model_id}', switched this call: {model_actually_switched_in_current_api_call}).")
+        
         try: validate_chat_request(request.messages, req_id)
         except ValueError as e: raise HTTPException(status_code=400, detail=f"[{req_id}] 无效请求: {e}")
-        prepared_prompt = prepare_combined_prompt(request.messages, req_id)
+
+        system_prompt_content, prepared_prompt = prepare_combined_prompt(request.messages, req_id)
         check_client_disconnected("After Prompt Prep: ")
+
         logger.info(f"[{req_id}] (Refactored Process) 开始清空聊天记录...")
         try:
             clear_chat_button_locator = page.locator(CLEAR_CHAT_BUTTON_SELECTOR)
@@ -2128,15 +2246,32 @@ async def _process_request_refactored(
 
             check_client_disconnected("After Clear Chat Logic (New): ")
         except (PlaywrightAsyncError, asyncio.TimeoutError, ClientDisconnectedError) as clear_err:
-            if isinstance(clear_err, ClientDisconnectedError): raise
+            if isinstance(clear_err, ClientDisconnectedError): raise # Re-raise to be caught by outer handler
             logger.error(f"[{req_id}] ❌ 错误: 清空聊天阶段出错: {clear_err}")
             await save_error_snapshot(f"clear_chat_error_{req_id}")
+            # Potentially raise HTTPException here if clearing chat is critical and fails
         except Exception as clear_exc:
             logger.exception(f"[{req_id}] ❌ 错误: 清空聊天阶段意外错误")
             await save_error_snapshot(f"clear_chat_unexpected_{req_id}")
+            # Potentially raise HTTPException here
+
         check_client_disconnected("After Clear Chat Logic: ")
-        if request.temperature is not None and page and not page.is_closed():
-            async with params_cache_lock:
+
+        # 参数设置块 (包括新的系统提示设置)
+        async with params_cache_lock:
+            # 设置系统提示词 (新逻辑)
+            if page and not page.is_closed():
+                logger.info(f"[{req_id}] (Refactored Process) 检查并设置系统提示...")
+                await set_system_prompt_in_page(
+                    page,
+                    system_prompt_content if system_prompt_content is not None else "", # Pass empty string if None
+                    req_id,
+                    check_client_disconnected
+                )
+            check_client_disconnected("系统提示调整 - 逻辑完成后: ")
+
+            # 设置温度 (现有逻辑)
+            if request.temperature is not None and page and not page.is_closed():
                 logger.info(f"[{req_id}] (Refactored Process) 检查并调整温度设置...")
                 requested_temp = request.temperature
                 clamped_temp = max(0.0, min(2.0, requested_temp))
@@ -2188,8 +2323,9 @@ async def _process_request_refactored(
                         page_params_cache.pop("temperature", None)
                         await save_error_snapshot(f"temperature_unknown_error_{req_id}")
             check_client_disconnected("温度调整 - 逻辑完成后: ")
-        if request.max_output_tokens is not None and page and not page.is_closed():
-            async with params_cache_lock:
+
+            # 设置最大输出 Token (现有逻辑)
+            if request.max_output_tokens is not None and page and not page.is_closed():
                 logger.info(f"[{req_id}] (Refactored Process) 检查并调整最大输出 Token 设置...")
                 requested_max_tokens = request.max_output_tokens
                 min_val_for_tokens = 1
@@ -2253,8 +2389,9 @@ async def _process_request_refactored(
                         page_params_cache.pop("max_output_tokens", None)
                         await save_error_snapshot(f"max_tokens_unknown_error_{req_id}")
             check_client_disconnected("最大输出Token调整 - 逻辑完成后: ")
-        if request.stop is not None and page and not page.is_closed():
-            async with params_cache_lock:
+
+            # 设置停止序列 (现有逻辑)
+            if request.stop is not None and page and not page.is_closed():
                 logger.info(f"[{req_id}] (Refactored Process) 检查并设置停止序列...")
                 requested_stop_sequences_raw = []
                 if isinstance(request.stop, str):
@@ -2311,47 +2448,51 @@ async def _process_request_refactored(
                         page_params_cache.pop("stop_sequences", None)
                         await save_error_snapshot(f"stop_sequence_unknown_error_{req_id}")
             check_client_disconnected("停止序列调整 - 逻辑完成后: ")
-        if request.top_p is not None and page and not page.is_closed():
-            logger.info(f"[{req_id}] (Refactored Process) 检查并调整 Top P 设置...")
-            requested_top_p = request.top_p
-            clamped_top_p = max(0.0, min(1.0, requested_top_p))
-            if abs(clamped_top_p - requested_top_p) > 1e-9:
-                logger.warning(f"[{req_id}] 请求的 Top P {requested_top_p} 超出范围 [0, 1]，已调整为 {clamped_top_p}")
-            top_p_input_locator = page.locator(TOP_P_INPUT_SELECTOR)
-            try:
-                await expect_async(top_p_input_locator).to_be_visible(timeout=5000)
-                check_client_disconnected("Top P 调整 - 输入框可见后: ")
-                current_top_p_str = await top_p_input_locator.input_value(timeout=3000)
-                check_client_disconnected("Top P 调整 - 读取输入框值后: ")
-                current_top_p_float = float(current_top_p_str)
-                logger.info(f"[{req_id}] 页面当前 Top P: {current_top_p_float}, 请求调整后 Top P: {clamped_top_p}")
-                if abs(current_top_p_float - clamped_top_p) > 1e-9:
-                    logger.info(f"[{req_id}] 页面 Top P ({current_top_p_float}) 与请求 Top P ({clamped_top_p}) 不同，正在更新...")
-                    await top_p_input_locator.fill(str(clamped_top_p), timeout=5000)
-                    check_client_disconnected("Top P 调整 - 填充输入框后: ")
-                    await asyncio.sleep(0.1)
-                    new_top_p_str = await top_p_input_locator.input_value(timeout=3000)
-                    new_top_p_float = float(new_top_p_str)
-                    if abs(new_top_p_float - clamped_top_p) < 1e-9:
-                        logger.info(f"[{req_id}] ✅ Top P 已成功更新为: {new_top_p_float}")
+
+            # 设置 Top P (现有逻辑)
+            if request.top_p is not None and page and not page.is_closed():
+                logger.info(f"[{req_id}] (Refactored Process) 检查并调整 Top P 设置...")
+                requested_top_p = request.top_p
+                clamped_top_p = max(0.0, min(1.0, requested_top_p))
+                if abs(clamped_top_p - requested_top_p) > 1e-9:
+                    logger.warning(f"[{req_id}] 请求的 Top P {requested_top_p} 超出范围 [0, 1]，已调整为 {clamped_top_p}")
+                top_p_input_locator = page.locator(TOP_P_INPUT_SELECTOR)
+                try:
+                    await expect_async(top_p_input_locator).to_be_visible(timeout=5000)
+                    check_client_disconnected("Top P 调整 - 输入框可见后: ")
+                    current_top_p_str = await top_p_input_locator.input_value(timeout=3000)
+                    check_client_disconnected("Top P 调整 - 读取输入框值后: ")
+                    current_top_p_float = float(current_top_p_str)
+                    logger.info(f"[{req_id}] 页面当前 Top P: {current_top_p_float}, 请求调整后 Top P: {clamped_top_p}")
+                    if abs(current_top_p_float - clamped_top_p) > 1e-9:
+                        logger.info(f"[{req_id}] 页面 Top P ({current_top_p_float}) 与请求 Top P ({clamped_top_p}) 不同，正在更新...")
+                        await top_p_input_locator.fill(str(clamped_top_p), timeout=5000)
+                        check_client_disconnected("Top P 调整 - 填充输入框后: ")
+                        await asyncio.sleep(0.1)
+                        new_top_p_str = await top_p_input_locator.input_value(timeout=3000)
+                        new_top_p_float = float(new_top_p_str)
+                        if abs(new_top_p_float - clamped_top_p) < 1e-9:
+                            logger.info(f"[{req_id}] ✅ Top P 已成功更新为: {new_top_p_float}")
+                        else:
+                            logger.warning(f"[{req_id}] ⚠️ Top P 更新后验证失败。页面显示: {new_top_p_float}, 期望: {clamped_top_p}")
                     else:
-                        logger.warning(f"[{req_id}] ⚠️ Top P 更新后验证失败。页面显示: {new_top_p_float}, 期望: {clamped_top_p}")
-                else:
-                    logger.info(f"[{req_id}] 页面 Top P ({current_top_p_float}) 与请求 Top P ({clamped_top_p}) 一致或在容差范围内，无需更改。")
-            except ValueError as ve:
-                logger.error(f"[{req_id}] 转换 Top P 值为浮点数时出错: '{current_top_p_str if 'current_top_p_str' in locals() else '未知值'}'. 错误: {ve}")
-                await save_error_snapshot(f"top_p_value_error_{req_id}")
-            except PlaywrightAsyncError as pw_err:
-                logger.error(f"[{req_id}] ❌ 操作 Top P 输入框时发生Playwright错误: {pw_err}")
-                await save_error_snapshot(f"top_p_playwright_error_{req_id}")
-            except ClientDisconnectedError:
-                logger.info(f"[{req_id}] 客户端在调整 Top P 时断开连接。")
-                raise
-            except Exception as e_top_p:
-                logger.exception(f"[{req_id}] ❌ 调整 Top P 时发生未知错误")
-                await save_error_snapshot(f"top_p_unknown_error_{req_id}")
-            check_client_disconnected("Top P 调整 - 逻辑完成后: ")
-        logger.info(f"[{req_id}] (Refactored Process) 填充并提交提示 ({len(prepared_prompt)} chars)...")
+                        logger.info(f"[{req_id}] 页面 Top P ({current_top_p_float}) 与请求 Top P ({clamped_top_p}) 一致或在容差范围内，无需更改。")
+                except ValueError as ve:
+                    logger.error(f"[{req_id}] 转换 Top P 值为浮点数时出错: '{current_top_p_str if 'current_top_p_str' in locals() else '未知值'}'. 错误: {ve}")
+                    await save_error_snapshot(f"top_p_value_error_{req_id}")
+                except PlaywrightAsyncError as pw_err:
+                    logger.error(f"[{req_id}] ❌ 操作 Top P 输入框时发生Playwright错误: {pw_err}")
+                    await save_error_snapshot(f"top_p_playwright_error_{req_id}")
+                except ClientDisconnectedError:
+                    logger.info(f"[{req_id}] 客户端在调整 Top P 时断开连接。")
+                    raise
+                except Exception as e_top_p:
+                    logger.exception(f"[{req_id}] ❌ 调整 Top P 时发生未知错误")
+                    await save_error_snapshot(f"top_p_unknown_error_{req_id}")
+                check_client_disconnected("Top P 调整 - 逻辑完成后: ")
+        # 参数设置块结束 (async with params_cache_lock)
+
+        logger.info(f"[{req_id}] (Refactored Process) 填充并提交用户提示 ({len(prepared_prompt)} chars)...") # 'prepared_prompt' 现在只包含用户/助手消息
         prompt_textarea_locator = page.locator(PROMPT_TEXTAREA_SELECTOR)
         autosize_wrapper_locator = page.locator('ms-prompt-input-wrapper ms-autosize-textarea')
         try:
