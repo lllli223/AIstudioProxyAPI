@@ -1,4 +1,5 @@
 import asyncio
+from typing import Optional
 import json
 import logging
 import ssl
@@ -14,7 +15,7 @@ class ProxyServer:
     """
     Asynchronous HTTPS proxy server with SSL inspection capabilities
     """
-    def __init__(self, host='0.0.0.0', port=3120, intercept_domains=None, upstream_proxy=None, queue: multiprocessing.Queue=None):
+    def __init__(self, host='0.0.0.0', port=3120, intercept_domains=None, upstream_proxy=None, queue: Optional[multiprocessing.Queue]=None):
         self.host = host
         self.port = port
         self.intercept_domains = intercept_domains or []
@@ -97,8 +98,13 @@ class ProxyServer:
             await reader.read(8192)
 
             loop = asyncio.get_running_loop()
-            transport = writer.transport
-            
+            transport = writer.transport # This is the original client transport
+
+            if transport is None: # 新增检查块开始
+                self.logger.warning(f"Client writer transport is None for {host}:{port} before TLS upgrade. Closing.")
+                # writer is likely already closed or in a bad state.
+                # We can't proceed with start_tls if transport is None.
+                return # Exit _handle_connect for this client # 新增检查块结束
 
             ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
             ssl_context.load_cert_chain(
@@ -106,21 +112,33 @@ class ProxyServer:
                 keyfile=self.cert_manager.cert_dir / f"{host}.key"
             )
 
+            # 1. 正确获取与原始 transport 关联的协议实例
+            # 'transport' here is 'writer.transport' from line 101, now checked not to be None
+            client_protocol = transport.get_protocol()
+
+            # 2. 将获取到的 client_protocol 实例传递给 start_tls
+            #    loop.start_tls 会修改这个 client_protocol 实例，使其与 new_transport 关联
             new_transport = await loop.start_tls(
                 transport=transport,
-                protocol=transport.get_protocol(),  # 使用 transport 的 _protocol
+                protocol=client_protocol,  # 关键：传递获取到的协议实例
                 sslcontext=ssl_context,
-                server_side=True  # 服务端模式
+                server_side=True
             )
 
+            # 3. 增加对 new_transport 的 None 检查 (主要为了类型安全和 Pylance)
+            if new_transport is None:
+                self.logger.error(f"loop.start_tls returned None for {host}:{port}, which is unexpected. Closing connection.")
+                # Ensure client writer is closed if it was opened or transport was valid before
+                writer.close()
+                # await writer.wait_closed() # Consider if waiting is necessary here
+                return
+            
             client_reader = reader
-            protocol = transport._protocol
-            protocol._stream_reader = client_reader
-            protocol.transport = new_transport
 
+            # 4. 创建 StreamWriter 时，使用被 start_tls 正确更新过的 client_protocol
             client_writer = asyncio.StreamWriter(
-                transport=new_transport,
-                protocol=protocol,
+                transport=new_transport,    # 使用新的 TLS transport
+                protocol=client_protocol,   # 关键：使用被 start_tls 更新过的协议实例
                 reader=client_reader,
                 loop=loop
             )

@@ -1,21 +1,57 @@
+import argparse # 新增导入
 from flask import Flask, request, jsonify
 import requests
 import time
 import uuid
 import logging
 import json
+import sys # 新增导入
 from typing import Dict, Any
 from datetime import datetime, UTC
 
+# 自定义日志 Handler，确保刷新
+class FlushingStreamHandler(logging.StreamHandler):
+    def emit(self, record):
+        try:
+            super().emit(record)
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
 # 配置日志（更改为中文）
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler()]
-)
-logger = logging.getLogger(__name__)
+log_format = '%(asctime)s [%(levelname)s] %(message)s'
+formatter = logging.Formatter(log_format)
+
+# 创建一个 handler 明确指向 sys.stderr 并使用自定义的 FlushingStreamHandler
+# sys.stderr 在子进程中应该被 gui_launcher.py 的 PIPE 捕获
+stderr_handler = FlushingStreamHandler(sys.stderr)
+stderr_handler.setFormatter(formatter)
+stderr_handler.setLevel(logging.INFO)
+
+# 获取根 logger 并添加我们的 handler
+# 这能确保所有传播到根 logger 的日志 (包括 Flask 和 Werkzeug 的，如果它们没有自己的特定 handler)
+# 都会经过这个 handler。
+root_logger = logging.getLogger()
+# 清除可能存在的由 basicConfig 或其他库添加的默认 handlers，以避免重复日志或意外输出
+if root_logger.hasHandlers():
+    root_logger.handlers.clear()
+root_logger.addHandler(stderr_handler)
+root_logger.setLevel(logging.INFO) # 确保根 logger 级别也设置了
+
+logger = logging.getLogger(__name__) # 获取名为 'llm' 的 logger，它会继承根 logger 的配置
 
 app = Flask(__name__)
+# Flask 的 app.logger 默认会传播到 root logger。
+# 如果需要，也可以为 app.logger 和 werkzeug logger 单独配置，但通常让它们传播到 root 就够了。
+# 例如:
+# app.logger.handlers.clear() # 清除 Flask 可能添加的默认 handler
+# app.logger.addHandler(stderr_handler)
+# app.logger.setLevel(logging.INFO)
+#
+# werkzeug_logger = logging.getLogger('werkzeug')
+# werkzeug_logger.handlers.clear()
+# werkzeug_logger.addHandler(stderr_handler)
+# werkzeug_logger.setLevel(logging.INFO)
 
 # 启用模型配置：直接定义启用的模型名称
 # 用户可添加/删除模型名称，动态生成元数据
@@ -30,7 +66,8 @@ ENABLED_MODELS = {
 }
 
 # API 配置
-API_URL = "http://localhost:2048/v1/chat/completions"
+API_URL = "" # 将在 main 函数中根据参数设置
+DEFAULT_MAIN_SERVER_PORT = 2048
 # 请替换为你的 API 密钥（请勿公开分享）
 API_KEY = "123456"
 
@@ -274,6 +311,20 @@ def api_chat_endpoint():
 
 def main():
     """启动模拟服务器"""
+    global API_URL # 声明我们要修改全局变量
+
+    parser = argparse.ArgumentParser(description="LLM Mock Service for AI Studio Proxy")
+    parser.add_argument(
+        "--main-server-port",
+        type=int,
+        default=DEFAULT_MAIN_SERVER_PORT,
+        help=f"Port of the main AI Studio Proxy server (default: {DEFAULT_MAIN_SERVER_PORT})"
+    )
+    args = parser.parse_args()
+
+    API_URL = f"http://localhost:{args.main_server_port}/v1/chat/completions"
+    
+    logger.info(f"模拟 Ollama 和 API 代理服务器将转发请求到: {API_URL}")
     logger.info("正在启动模拟 Ollama 和 API 代理服务器，地址: http://localhost:11434")
     app.run(host="0.0.0.0", port=11434, debug=False)
 

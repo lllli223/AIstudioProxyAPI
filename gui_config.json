@@ -2,7 +2,7 @@
   "fastapi_port": "2048",
   "camoufox_debug_port": "9222",
   "stream_port": "3120",
-  "stream_port_enabled": true,
+  "stream_port_enabled": false,
   "helper_endpoint": "",
   "helper_enabled": false,
   "proxy_address": "http://127.0.0.1:7890",

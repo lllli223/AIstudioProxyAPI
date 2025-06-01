@@ -228,7 +228,20 @@ LANG_TEXTS = {
     "querying_ports_status": {"zh": "正在查询端口: {ports_desc}...", "en": "Querying ports: {ports_desc}..."},
     "port_query_result_format": {"zh": "[{port_type} - {port_num}] {pid_info}", "en": "[{port_type} - {port_num}] {pid_info}"},
     "port_not_in_use_format": {"zh": "[{port_type} - {port_num}] 未被占用", "en": "[{port_type} - {port_num}] Not in use"},
-    "pids_on_multiple_ports_label": {"zh": "多端口占用情况:", "en": "Multi-Port Usage:"}
+    "pids_on_multiple_ports_label": {"zh": "多端口占用情况:", "en": "Multi-Port Usage:"},
+    "launch_llm_service_btn": {"zh": "启动本地LLM模拟服务", "en": "Launch Local LLM Mock Service"},
+    "stop_llm_service_btn": {"zh": "停止本地LLM模拟服务", "en": "Stop Local LLM Mock Service"},
+    "llm_service_name_key": {"zh": "本地LLM模拟服务", "en": "Local LLM Mock Service"},
+    "status_llm_starting": {"zh": "本地LLM模拟服务启动中 (PID: {pid})...", "en": "Local LLM Mock Service starting (PID: {pid})..."},
+    "status_llm_stopped": {"zh": "本地LLM模拟服务已停止。", "en": "Local LLM Mock Service stopped."},
+    "status_llm_stop_error": {"zh": "停止本地LLM模拟服务时出错。", "en": "Error stopping Local LLM Mock Service."},
+    "status_llm_already_running": {"zh": "本地LLM模拟服务已在运行 (PID: {pid})。", "en": "Local LLM Mock Service is already running (PID: {pid})."},
+    "status_llm_not_running": {"zh": "本地LLM模拟服务未在运行。", "en": "Local LLM Mock Service is not running."},
+    "status_llm_backend_check": {"zh": "正在检查LLM后端服务 ...", "en": "Checking LLM backend service ..."},
+    "status_llm_backend_ok_starting": {"zh": "LLM后端服务 (localhost:{port}) 正常，正在启动模拟服务...", "en": "LLM backend service (localhost:{port}) OK, starting mock service..."},
+    "status_llm_backend_fail": {"zh": "LLM后端服务 (localhost:{port}) 未响应，无法启动模拟服务。", "en": "LLM backend service (localhost:{port}) not responding, cannot start mock service."},
+    "confirm_stop_llm_title": {"zh": "确认停止LLM服务", "en": "Confirm Stop LLM Service"},
+    "confirm_stop_llm_message": {"zh": "确定要停止本地LLM模拟服务吗?", "en": "Are you sure you want to stop the Local LLM Mock Service?"}
 }
 
 # 删除重复的定义
@@ -244,6 +257,15 @@ proxy_address_var: Optional[tk.StringVar] = None  # 添加变量存储代理地�
 proxy_enabled_var: Optional[tk.BooleanVar] = None  # 添加变量标记代理是否启用
 active_auth_file_display_var: Optional[tk.StringVar] = None # 用于显示当前认证文件
 
+LLM_PY_FILENAME = "llm.py"
+llm_service_process_info: Dict[str, Any] = {
+    "popen": None,
+    "monitor_thread": None,
+    "stdout_thread": None,
+    "stderr_thread": None,
+    "service_name_key": "llm_service_name_key" # Corresponds to a LANG_TEXTS key
+}
+
 # 将所有辅助函数定义移到 build_gui 之前
 
 def get_text(key: str, **kwargs) -> str:
@@ -255,17 +277,24 @@ def get_text(key: str, **kwargs) -> str:
 
 def update_status_bar(message_key: str, **kwargs):
     message = get_text(message_key, **kwargs)
-    if process_status_text_var:
-        process_status_text_var.set(message)
-    if managed_process_info.get("output_area"):
-        def _update_output():
-            current_message = message
-            if managed_process_info.get("output_area") and root_widget:
-                managed_process_info["output_area"].config(state=tk.NORMAL)
-                managed_process_info["output_area"].insert(tk.END, f"[STATUS] {current_message}\n")
-                managed_process_info["output_area"].see(tk.END)
-                managed_process_info["output_area"].config(state=tk.DISABLED)
-        if root_widget: root_widget.after_idle(_update_output)
+    
+    def _perform_gui_updates():
+        # Update the status bar label's text variable
+        if process_status_text_var:
+            process_status_text_var.set(message)
+
+        # Update the main log text area (if it exists)
+        if managed_process_info.get("output_area"):
+            # The 'message' variable is captured from the outer scope (closure)
+            if root_widget: # Ensure root_widget is still valid
+                output_area_widget = managed_process_info["output_area"]
+                output_area_widget.config(state=tk.NORMAL)
+                output_area_widget.insert(tk.END, f"[STATUS] {message}\n")
+                output_area_widget.see(tk.END)
+                output_area_widget.config(state=tk.DISABLED)
+                
+    if root_widget:
+        root_widget.after_idle(_perform_gui_updates)
 
 def is_port_in_use(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -1074,6 +1103,251 @@ def start_virtual_display_gui():
     update_status_bar("status_virtual_display_launch")
     _launch_process_gui(cmd, "service_name_virtual_display", env_vars=proxy_env)
 
+# --- LLM Mock Service Management ---
+
+def is_llm_service_running() -> bool:
+    """检查本地LLM模拟服务是否正在运行"""
+    return llm_service_process_info.get("popen") and \
+           llm_service_process_info["popen"].poll() is None
+
+def monitor_llm_process_thread_target():
+    """监控LLM服务进程，捕获输出并更新状态"""
+    popen = llm_service_process_info.get("popen")
+    service_name_key = llm_service_process_info.get("service_name_key") # "llm_service_name_key"
+    output_area = managed_process_info.get("output_area") # Use the main output area
+
+    if not popen or not service_name_key or not output_area:
+        logger.error("LLM monitor thread: Popen, service_name_key, or output_area is None.")
+        return
+
+    service_name = get_text(service_name_key)
+    logger.info(f"Starting monitor thread for {service_name} (PID: {popen.pid})")
+
+    # stdout/stderr redirection
+    if popen.stdout:
+        llm_service_process_info["stdout_thread"] = threading.Thread(
+            target=enqueue_stream_output, args=(popen.stdout, f"{service_name}-stdout"), daemon=True
+        )
+        llm_service_process_info["stdout_thread"].start()
+    
+    if popen.stderr:
+        llm_service_process_info["stderr_thread"] = threading.Thread(
+            target=enqueue_stream_output, args=(popen.stderr, f"{service_name}-stderr"), daemon=True
+        )
+        llm_service_process_info["stderr_thread"].start()
+
+    popen.wait() # Wait for the process to terminate
+    exit_code = popen.returncode
+    logger.info(f"{service_name} (PID: {popen.pid}) terminated with exit code {exit_code}.")
+
+    if llm_service_process_info.get("stdout_thread") and llm_service_process_info["stdout_thread"].is_alive():
+        llm_service_process_info["stdout_thread"].join(timeout=1)
+    if llm_service_process_info.get("stderr_thread") and llm_service_process_info["stderr_thread"].is_alive():
+        llm_service_process_info["stderr_thread"].join(timeout=1)
+
+    # Update status only if this was the process we were tracking
+    if llm_service_process_info.get("popen") == popen:
+        update_status_bar("status_llm_stopped")
+        llm_service_process_info["popen"] = None
+        llm_service_process_info["monitor_thread"] = None
+        llm_service_process_info["stdout_thread"] = None
+        llm_service_process_info["stderr_thread"] = None
+
+def _actually_launch_llm_service():
+    """实际启动 llm.py 脚本"""
+    global llm_service_process_info
+    service_name_key = "llm_service_name_key"
+    service_name = get_text(service_name_key)
+    output_area = managed_process_info.get("output_area")
+
+    if not output_area:
+        logger.error("Cannot launch LLM service: Main output area is not available.")
+        update_status_bar("status_error_starting", service_name=service_name)
+        return
+
+    llm_script_path = os.path.join(SCRIPT_DIR, LLM_PY_FILENAME)
+    if not os.path.exists(llm_script_path):
+        messagebox.showerror(get_text("error_title"), get_text("startup_script_not_found_msgbox", script=LLM_PY_FILENAME))
+        update_status_bar("status_script_not_found", service_name=service_name)
+        return
+
+    # Get the main server port from GUI to pass to llm.py
+    main_server_port = get_fastapi_port_from_gui() # Ensure this function is available and returns the correct port
+
+    cmd = [PYTHON_EXECUTABLE, llm_script_path, f"--main-server-port={main_server_port}"]
+    logger.info(f"Attempting to launch LLM service with command: {' '.join(cmd)}")
+
+    try:
+        # Clear previous LLM service output if any, or add a header
+        output_area.config(state=tk.NORMAL)
+        output_area.insert(tk.END, f"--- Starting {service_name} ---\n")
+        output_area.config(state=tk.DISABLED)
+        
+        effective_env = os.environ.copy()
+        effective_env['PYTHONUNBUFFERED'] = '1' # Ensure unbuffered output for real-time logging
+        effective_env['PYTHONIOENCODING'] = 'utf-8'
+
+        popen = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False, # Read as bytes for enqueue_stream_output
+            cwd=SCRIPT_DIR,
+            env=effective_env,
+            creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+        )
+        llm_service_process_info["popen"] = popen
+        llm_service_process_info["service_name_key"] = service_name_key
+        
+        update_status_bar("status_llm_starting", pid=popen.pid)
+        logger.info(f"{service_name} started with PID: {popen.pid}")
+
+        # Start monitoring thread
+        monitor_thread = threading.Thread(target=monitor_llm_process_thread_target, daemon=True)
+        llm_service_process_info["monitor_thread"] = monitor_thread
+        monitor_thread.start()
+
+    except FileNotFoundError:
+        messagebox.showerror(get_text("error_title"), get_text("script_not_found_error_msgbox", cmd=' '.join(cmd)))
+        update_status_bar("status_script_not_found", service_name=service_name)
+        logger.error(f"FileNotFoundError when trying to launch LLM service: {cmd}")
+    except Exception as e:
+        messagebox.showerror(get_text("error_title"), f"{service_name} - {get_text('error_title')}: {e}")
+        update_status_bar("status_error_starting", service_name=service_name)
+        logger.error(f"Exception when launching LLM service: {e}", exc_info=True)
+        llm_service_process_info["popen"] = None # Ensure it's cleared on failure
+
+def _check_llm_backend_and_launch_thread():
+    """检查LLM后端服务 (动态端口) 并在成功后启动llm.py"""
+    # Get the current FastAPI port from the GUI
+    # This needs to be called within this thread, right before the check,
+    # as port_entry_var might be accessed from a different thread if called outside.
+    # However, Tkinter GUI updates should ideally be done from the main thread.
+    # For reading a StringVar, it's generally safe.
+    current_fastapi_port = get_fastapi_port_from_gui()
+
+    # Update status bar and logger with the dynamic port
+    # For status bar updates from a thread, it's better to use root_widget.after or a queue,
+    # but for simplicity in this context, direct update_status_bar call is used.
+    # Ensure update_status_bar is thread-safe or schedules GUI updates.
+    # The existing update_status_bar uses root_widget.after_idle, which is good.
+    
+    # Dynamically create the message keys for status bar to include the port
+    backend_check_msg_key = "status_llm_backend_check" # Original key
+    backend_ok_msg_key = "status_llm_backend_ok_starting"
+    backend_fail_msg_key = "status_llm_backend_fail"
+    
+    # It's better to pass the port as a parameter to get_text if the LANG_TEXTS are updated
+    # For now, we'll just log the dynamic port separately.
+    update_status_bar(backend_check_msg_key) # Still uses the generic message
+    logger.info(f"Checking LLM backend service at localhost:{current_fastapi_port}...")
+    
+    backend_ok = False
+    try:
+        with socket.create_connection(("localhost", current_fastapi_port), timeout=3) as sock:
+            backend_ok = True
+        logger.info(f"LLM backend service (localhost:{current_fastapi_port}) is responsive.")
+    except (socket.timeout, ConnectionRefusedError, OSError) as e:
+        logger.warning(f"LLM backend service (localhost:{current_fastapi_port}) not responding: {e}")
+        backend_ok = False
+    
+    if root_widget: # Ensure GUI is still there
+        if backend_ok:
+            update_status_bar(backend_ok_msg_key, port=current_fastapi_port) # Pass port to fill placeholder
+            _actually_launch_llm_service() # This already gets the port via get_fastapi_port_from_gui()
+        else:
+            # Update status bar with the dynamic port for failure message
+            update_status_bar(backend_fail_msg_key, port=current_fastapi_port)
+            
+            # Show warning messagebox with the dynamic port
+            # The status bar is already updated by update_status_bar,
+            # so no need to manually set process_status_text_var or write to output_area here again for the same message.
+            # The update_status_bar function handles writing to the output_area if configured.
+            messagebox.showwarning(
+                get_text("warning_title"),
+                get_text(backend_fail_msg_key, port=current_fastapi_port), # Use get_text with port for the messagebox
+                parent=root_widget
+            )
+
+def start_llm_service_gui():
+    """GUI命令：启动本地LLM模拟服务"""
+    if is_llm_service_running():
+        pid = llm_service_process_info["popen"].pid
+        update_status_bar("status_llm_already_running", pid=pid)
+        messagebox.showinfo(get_text("info_title"), get_text("status_llm_already_running", pid=pid), parent=root_widget)
+        return
+
+    # Run the check and actual launch in a new thread to keep GUI responsive
+    # The check itself can take a few seconds if the port is unresponsive.
+    threading.Thread(target=_check_llm_backend_and_launch_thread, daemon=True).start()
+
+def stop_llm_service_gui():
+    """GUI命令：停止本地LLM模拟服务"""
+    service_name = get_text(llm_service_process_info.get("service_name_key", "llm_service_name_key"))
+    popen = llm_service_process_info.get("popen")
+
+    if not popen or popen.poll() is not None:
+        update_status_bar("status_llm_not_running")
+        # messagebox.showinfo(get_text("info_title"), get_text("status_llm_not_running"), parent=root_widget)
+        return
+
+    if messagebox.askyesno(get_text("confirm_stop_llm_title"), get_text("confirm_stop_llm_message"), parent=root_widget):
+        logger.info(f"Attempting to stop {service_name} (PID: {popen.pid})")
+        update_status_bar("status_stopping_service", service_name=service_name, pid=popen.pid)
+        
+        try:
+            # Attempt graceful termination first
+            if platform.system() == "Windows":
+                # On Windows, sending SIGINT to a Popen object created with CREATE_NO_WINDOW
+                # might not work as expected for Flask apps. taskkill is more reliable.
+                # We can try to send Ctrl+C to the console if it had one, but llm.py is simple.
+                # For Flask, direct popen.terminate() or popen.kill() is often used.
+                logger.info(f"Sending SIGTERM/terminate to {service_name} (PID: {popen.pid}) on Windows.")
+                popen.terminate() # Sends SIGTERM on Unix, TerminateProcess on Windows
+            else: # Linux/macOS
+                logger.info(f"Sending SIGINT to {service_name} (PID: {popen.pid}) on {platform.system()}.")
+                popen.send_signal(signal.SIGINT)
+
+            # Wait for a short period for graceful shutdown
+            try:
+                popen.wait(timeout=5) # Wait up to 5 seconds
+                logger.info(f"{service_name} (PID: {popen.pid}) terminated gracefully after signal.")
+                update_status_bar("status_llm_stopped")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"{service_name} (PID: {popen.pid}) did not terminate after signal. Forcing kill.")
+                popen.kill() # Force kill
+                popen.wait(timeout=2) # Wait for kill to take effect
+                update_status_bar("status_llm_stopped") # Assume killed
+                logger.info(f"{service_name} (PID: {popen.pid}) was force-killed.")
+            
+        except Exception as e:
+            logger.error(f"Error stopping {service_name} (PID: {popen.pid}): {e}", exc_info=True)
+            update_status_bar("status_llm_stop_error")
+            messagebox.showerror(get_text("error_title"), f"Error stopping {service_name}: {e}", parent=root_widget)
+        finally:
+            # Ensure threads are joined and resources cleaned up, even if already done by monitor
+            if llm_service_process_info.get("stdout_thread") and llm_service_process_info["stdout_thread"].is_alive():
+                llm_service_process_info["stdout_thread"].join(timeout=0.5)
+            if llm_service_process_info.get("stderr_thread") and llm_service_process_info["stderr_thread"].is_alive():
+                llm_service_process_info["stderr_thread"].join(timeout=0.5)
+            
+            llm_service_process_info["popen"] = None
+            llm_service_process_info["monitor_thread"] = None
+            llm_service_process_info["stdout_thread"] = None
+            llm_service_process_info["stderr_thread"] = None
+            
+            # Clear related output from the main log area or add a "stopped" message
+            output_area = managed_process_info.get("output_area")
+            if output_area:
+                output_area.config(state=tk.NORMAL)
+                output_area.insert(tk.END, f"--- {service_name} stopped ---\n")
+                output_area.see(tk.END)
+                output_area.config(state=tk.DISABLED)
+    else:
+        logger.info(f"User cancelled stopping {service_name}.")
+
+# --- End LLM Mock Service Management ---
+
 def query_port_and_display_pids_gui():
     ports_to_query_info = []
     ports_desc_list = []
@@ -1546,6 +1820,18 @@ def build_gui(root: tk.Tk):
     widgets_to_translate.append({"widget": btn_virtual_display, "key": "launch_virtual_display_btn"})
     if platform.system() != "Linux":
         btn_virtual_display.state(['disabled'])
+
+    # Separator for LLM service buttons
+    ttk.Separator(launch_options_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=5, pady=(8,5))
+
+    # LLM Service Buttons
+    btn_start_llm_service = ttk.Button(launch_options_frame, text="", command=start_llm_service_gui)
+    btn_start_llm_service.pack(fill=tk.X, padx=5, pady=3)
+    widgets_to_translate.append({"widget": btn_start_llm_service, "key": "launch_llm_service_btn"})
+
+    btn_stop_llm_service = ttk.Button(launch_options_frame, text="", command=stop_llm_service_gui)
+    btn_stop_llm_service.pack(fill=tk.X, padx=5, pady=3)
+    widgets_to_translate.append({"widget": btn_stop_llm_service, "key": "stop_llm_service_btn"})
     
     # 移除不再有用的"停止当前GUI管理的服务"按钮
     # btn_stop_service = ttk.Button(launch_options_frame, text="", command=stop_managed_service_gui)
@@ -1696,6 +1982,33 @@ def _get_launch_parameters() -> Optional[Dict[str, Any]]:
 def on_app_close_main():
     # 保存当前配置
     save_config()
+
+    # Attempt to stop LLM service if it's running
+    if is_llm_service_running():
+        logger.info("LLM service is running. Attempting to stop it before exiting GUI.")
+        # We can call stop_llm_service_gui directly, but it shows a confirmation.
+        # For closing, we might want a more direct stop or a specific "closing" stop.
+        # For now, let's try a direct stop without user confirmation for this specific path.
+        popen = llm_service_process_info.get("popen")
+        service_name = get_text(llm_service_process_info.get("service_name_key", "llm_service_name_key"))
+        if popen:
+            try:
+                logger.info(f"Sending SIGINT to {service_name} (PID: {popen.pid}) during app close.")
+                if platform.system() == "Windows":
+                    popen.terminate() # TerminateProcess on Windows
+                else:
+                    popen.send_signal(signal.SIGINT)
+                
+                # Give it a very short time to exit, don't block GUI closing for too long
+                popen.wait(timeout=1.5)
+                logger.info(f"{service_name} (PID: {popen.pid}) hopefully stopped during app close.")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"{service_name} (PID: {popen.pid}) did not stop quickly during app close. May need manual cleanup.")
+                popen.kill() # Force kill if it didn't stop
+            except Exception as e:
+                logger.error(f"Error stopping {service_name} during app close: {e}")
+            finally:
+                llm_service_process_info["popen"] = None # Clear it
     
     # 服务都是在独立终端中启动的，所以只需确认用户是否想关闭GUI
     if messagebox.askyesno(get_text("confirm_quit_title"), get_text("confirm_quit_message"), parent=root_widget):
