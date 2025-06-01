@@ -148,6 +148,10 @@ worker_task: Optional[Task] = None
 page_params_cache: Dict[str, Any] = {}
 params_cache_lock: Optional[Lock] = None
 
+# 新增：用于缓存上次成功同步到页面的API消息列表及其锁
+last_api_messages_synced_to_page: Optional[List[Message]] = None
+page_sync_cache_lock: Optional[Lock] = None
+
 logger = logging.getLogger("AIStudioProxyServer")
 log_ws_manager = None
 
@@ -1043,6 +1047,8 @@ async def lifespan(app_param: FastAPI):
     global is_playwright_ready, is_browser_connected, is_page_ready, is_initializing
     global logger, log_ws_manager, model_list_fetch_event, current_ai_studio_model_id, excluded_model_ids
     global request_queue, processing_lock, model_switching_lock, page_params_cache, params_cache_lock
+    # 新增全局变量的引用
+    global last_api_messages_synced_to_page, page_sync_cache_lock
     true_original_stdout, true_original_stderr = sys.stdout, sys.stderr
     global STREAM_QUEUE ,STREAM_PROCESS, PROXY_SERVER_ENV, STREAM_PROXY_SERVER_ENV, STREAM_PORT, PROXY_SERVER_ENV
     global PLAYWRIGHT_PROXY_SETTINGS
@@ -1091,6 +1097,8 @@ async def lifespan(app_param: FastAPI):
     model_switching_lock = asyncio.Lock()
     model_list_fetch_event = asyncio.Event()
     params_cache_lock = asyncio.Lock()
+    # 初始化新的锁
+    page_sync_cache_lock = asyncio.Lock()
     if PLAYWRIGHT_PROXY_SETTINGS:
         logger.info(f"--- 代理配置检测到 (由 server.py 的 lifespan 记录) ---")
         logger.info(f"   将使用代理服务器: {PLAYWRIGHT_PROXY_SETTINGS['server']}")
@@ -1130,6 +1138,10 @@ async def lifespan(app_param: FastAPI):
                     page_instance = temp_page_instance
                     is_page_ready = temp_is_page_ready
                     await _handle_initial_model_state_and_storage(page_instance)
+                    # 页面初始化成功后，清空页面消息缓存
+                    async with page_sync_cache_lock:
+                        last_api_messages_synced_to_page = None
+                        logger.info(f"   页面初始化成功，已清空 last_api_messages_synced_to_page。")
                 else:
                     is_page_ready = False
                     if not model_list_fetch_event.is_set(): model_list_fetch_event.set()
@@ -1219,6 +1231,9 @@ async def lifespan(app_param: FastAPI):
                 logger.info(f"   ✅ Playwright 已停止。")
             except Exception as stop_err: logger.error(f"   ❌ 停止 Playwright 时出错: {stop_err}", exc_info=True)
             finally: playwright_manager = None; is_playwright_ready = False
+        # 重置页面同步缓存
+        last_api_messages_synced_to_page = None
+        logger.info(f"   重置 last_api_messages_synced_to_page 缓存。")
         restore_original_streams(initial_stdout_before_redirect, initial_stderr_before_redirect)
         restore_original_streams(true_original_stdout, true_original_stderr)
         logger.info(f"✅ FastAPI 应用生命周期: 关闭完成。")
@@ -3352,6 +3367,10 @@ async def switch_ai_studio_model(page: AsyncPage, model_id: str, req_id: str) ->
                 except Exception as e_disp:
                     logger.warning(f"[{req_id}] 读取页面显示的当前模型名称时出错: {e_disp}。将无法验证页面显示。")
             if page_display_match:
+                # 模型切换成功，清空页面消息缓存
+                async with page_sync_cache_lock:
+                    last_api_messages_synced_to_page = None
+                    logger.info(f"[{req_id}] 模型切换成功，已清空 last_api_messages_synced_to_page。")
                 return True
             else:
                 logger.error(f"[{req_id}] ❌ 模型切换失败，因为页面显示的模型与期望不符 (即使localStorage可能已更改)。")
