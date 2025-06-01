@@ -145,7 +145,7 @@ request_queue: Optional[Queue] = None
 processing_lock: Optional[Lock] = None
 worker_task: Optional[Task] = None
 
-page_params_cache: Dict[str, Any] = {}
+page_params_cache: Dict[str, Any] = {"temperature":"1.0"}
 params_cache_lock: Optional[Lock] = None
 
 # 新增：用于缓存上次成功同步到页面的API消息列表及其锁
@@ -352,6 +352,11 @@ class ClientDisconnectedError(Exception):
     pass
 
 # --- Helper Functions ---
+def generate_random_string(length: int) -> str:
+    """生成指定长度的随机字符串，包含小写字母和数字。"""
+    charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+    return ''.join(random.choice(charset) for _ in range(length))
+
 def prepare_combined_prompt(messages: List[Message], req_id: str) -> Tuple[Optional[str], str]:
     logger.info(f"[{req_id}] (准备提示) 正在从 {len(messages)} 条消息准备组合提示和提取系统提示。")
     combined_parts = []
@@ -490,7 +495,7 @@ def is_incremental_messages(old_messages: Optional[List['Message']], new_message
     if len(new_messages) <= len(old_messages):
         logger.debug(f"[{req_id}] (is_incremental) 否: 新消息列表不够长 (新: {len(new_messages)}, 旧: {len(old_messages)})。")
         return False
-
+    logger.debug(f"[{req_id}] (is_incremental) 正在比较新旧消息列表长度 (新: {len(new_messages)}, 旧: {len(old_messages)})。")
     # 逐条比较旧消息部分是否完全一致
     for i in range(len(old_messages)):
         # Pydantic 模型可以直接比较，会自动比较所有字段
@@ -2704,10 +2709,7 @@ async def _process_request_refactored(
 
             # --- 页面交互逻辑结束 ---
 
-            # 确保 generate_random_string 函数已定义或可访问
-            def generate_random_string(length): # TODO: 考虑移到全局或工具模块
-                charset = "abcdefghijklmnopqrstuvwxyz0123456789"
-                return ''.join(random.choice(charset) for _ in range(length))
+            # generate_random_string 函数现在已移至全局作用域
 
             if is_streaming:
                 try:
