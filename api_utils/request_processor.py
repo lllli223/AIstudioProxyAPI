@@ -291,6 +291,8 @@ async def _clear_chat_history(req_id: str, page: AsyncPage, check_client_disconn
         if can_attempt_clear:
             await clear_chat_button_locator.click(timeout=CLICK_TIMEOUT_MS)
             await expect_async(overlay_locator).to_be_visible(timeout=WAIT_FOR_ELEMENT_TIMEOUT_MS)
+            await expect_async(confirm_button_locator).to_be_visible(timeout=CLICK_TIMEOUT_MS)
+            await expect_async(confirm_button_locator).to_be_enabled(timeout=CLICK_TIMEOUT_MS)
             await confirm_button_locator.click(timeout=CLICK_TIMEOUT_MS)
             await expect_async(confirm_button_locator).to_be_hidden(timeout=CLEAR_CHAT_VERIFY_TIMEOUT_MS)
             await expect_async(overlay_locator).to_be_hidden(timeout=1000)
@@ -492,8 +494,22 @@ async def _submit_prompt(req_id: str, page: AsyncPage, prepared_prompt: str, che
         check_client_disconnected("JS填充后: ")
         
         await expect_async(submit_button_locator).to_be_enabled(timeout=40000)
-        await submit_button_locator.click(timeout=CLICK_TIMEOUT_MS)
-        logger.info(f"[{req_id}] ✅ 提示已提交。")
+        
+        max_click_attempts = 3
+        for attempt in range(max_click_attempts):
+            try:
+                check_client_disconnected(f"提交按钮点击前 (尝试 {attempt + 1}): ")
+                await submit_button_locator.click(timeout=CLICK_TIMEOUT_MS)
+                logger.info(f"[{req_id}] ✅ 提示已在尝试 {attempt + 1}/{max_click_attempts} 次后成功提交。")
+                break # Success, exit loop
+            except (PlaywrightAsyncError, asyncio.TimeoutError) as e:
+                logger.warning(f"[{req_id}] 提交提示时点击失败 (尝试 {attempt + 1}/{max_click_attempts}): {type(e).__name__}")
+                if attempt < max_click_attempts - 1:
+                    await save_error_snapshot(f"submit_prompt_click_retry_attempt_{attempt+1}_{req_id}")
+                    await asyncio.sleep(random.uniform(0.5, 1.5)) # Wait before next retry
+                else:
+                    logger.error(f"[{req_id}] ❌ 经过 {max_click_attempts} 次尝试后，提交提示最终失败。")
+                    raise
         
     except (PlaywrightAsyncError, asyncio.TimeoutError, ClientDisconnectedError) as e_submit:
         if isinstance(e_submit, ClientDisconnectedError): raise
@@ -744,12 +760,17 @@ async def _process_request_refactored(
         prompt_to_send_to_page = ""
         
         async with context['page_sync_cache_lock']:
-            if is_incremental_messages(context['last_api_messages_synced_to_page'], request.messages, req_id):
+            full_sync_reason = ""
+            if context['model_actually_switched']:
+                full_sync_reason = "模型已切换"
+            elif not is_incremental_messages(context['last_api_messages_synced_to_page'], request.messages, req_id):
+                full_sync_reason = "消息非增量"
+
+            if not full_sync_reason:
                 is_incremental_page_update = True
-                num_old_messages = len(context['last_api_messages_synced_to_page'])
+                num_old_messages = len(context.get('last_api_messages_synced_to_page', []))
                 newly_added_messages = request.messages[num_old_messages:]
                 
-                # 增量更新只发送最后一条用户消息
                 if newly_added_messages and newly_added_messages[-1].role == 'user':
                     last_user_message_content = newly_added_messages[-1].content
                     if isinstance(last_user_message_content, str):
@@ -760,11 +781,11 @@ async def _process_request_refactored(
                     else:
                         prompt_to_send_to_page = str(last_user_message_content or "")
                 
-                logger.info(f"[{req_id}] (Incremental) 页面将增量更新。")
+                logger.info(f"[{req_id}] (增量) 页面将进行增量更新。")
             else:
                 is_incremental_page_update = False
                 prompt_to_send_to_page = prepared_prompt
-                logger.info(f"[{req_id}] (Full Sync) 页面将执行完整同步。")
+                logger.info(f"[{req_id}] (完全同步) 页面将执行完全同步，原因: {full_sync_reason}。")
 
         # --- 执行页面操作 ---
         try:

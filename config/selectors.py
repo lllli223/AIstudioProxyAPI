@@ -12,7 +12,7 @@ SYSTEM_INSTRUCTIONS_TEXTAREA_SELECTOR = 'textarea[placeholder="Optional tone and
 # --- 按钮选择器 ---
 SUBMIT_BUTTON_SELECTOR = 'button[aria-label="Run"].run-button'
 CLEAR_CHAT_BUTTON_SELECTOR = 'button[data-test-clear="outside"][aria-label="Clear chat"]'
-CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR = 'button.mdc-button:has-text("Continue")'
+CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR = 'mat-dialog-actions button:has-text("Continue")'
 SYSTEM_INSTRUCTIONS_BUTTON_SELECTOR = 'button[data-test-si][aria-label="System instructions"]'
 
 # --- 响应相关选择器 ---
