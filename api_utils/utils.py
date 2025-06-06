@@ -7,9 +7,10 @@ import asyncio
 import json
 import time
 import datetime
-from typing import Any, Dict, List, Optional, AsyncGenerator
+from typing import Any, Dict, List, Optional, AsyncGenerator, Tuple
 from asyncio import Queue
-from models import Message
+
+from models import Message, MessageContentItem, ToolCall
 
 
 
@@ -191,115 +192,149 @@ def validate_chat_request(messages: List[Message], req_id: str) -> Dict[str, Opt
     }
 
 
-# --- 提示准备函数 ---
-def prepare_combined_prompt(messages: List[Message], req_id: str) -> str:
-    """准备组合提示"""
+# --- 提示准备函数 (已更新) ---
+def prepare_combined_prompt(messages: List[Message], req_id: str) -> Tuple[Optional[str], str]:
+    """
+    准备组合提示。
+    该函数会从消息列表中提取第一个系统消息作为独立的系统提示，
+    并将其余的用户、助手和工具消息组合成一个单一的对话历史字符串。
+    
+    Args:
+        messages: 消息对象列表。
+        req_id: 请求ID，用于日志记录。
+
+    Returns:
+        一个元组 (system_prompt, combined_prompt):
+        - system_prompt (Optional[str]): 提取的系统提示内容。如果找到但内容为空，则返回空字符串""。
+                                         如果没有找到系统消息，则返回 None。
+        - combined_prompt (str): 组合后的用户/助手/工具对话历史字符串。
+    """
     from server import logger
-    
-    logger.info(f"[{req_id}] (准备提示) 正在从 {len(messages)} 条消息准备组合提示 (包括历史)。")
-    
+    logger.info(f"[{req_id}] (准备提示) 正在从 {len(messages)} 条消息准备组合提示和提取系统提示。")
     combined_parts = []
     system_prompt_content: Optional[str] = None
-    processed_system_message_indices = set()
-    
-    # 处理系统消息
+    first_system_message_index = -1
+
+    # 寻找第一个系统消息并提取其内容
     for i, msg in enumerate(messages):
         if msg.role == 'system':
-            content = msg.content
-            if isinstance(content, str) and content.strip():
-                system_prompt_content = content.strip()
-                processed_system_message_indices.add(i)
-                logger.info(f"[{req_id}] (准备提示) 在索引 {i} 找到并使用系统提示: '{system_prompt_content[:80]}...'")
-                system_instr_prefix = "系统指令:\n"
-                combined_parts.append(f"{system_instr_prefix}{system_prompt_content}")
+            if isinstance(msg.content, str) and msg.content.strip():
+                system_prompt_content = msg.content.strip()
+                logger.info(f"[{req_id}] (准备提示) 在索引 {i} 找到并提取系统提示: '{system_prompt_content[:80]}...'")
             else:
-                logger.info(f"[{req_id}] (准备提示) 在索引 {i} 忽略非字符串或空的系统消息。")
-                processed_system_message_indices.add(i)
-            break
-    
-    role_map_ui = {"user": "用户", "assistant": "助手", "system": "系统", "tool": "工具"}
+                # 如果系统消息内容为空或非字符串，则视为无有效系统提示，将用空字符串表示清空
+                logger.info(f"[{req_id}] (准备提示) 在索引 {i} 找到系统消息，但内容为空或非字符串，系统提示将为空字符串。")
+                system_prompt_content = "" # 表示清空
+            first_system_message_index = i
+            break # 只处理第一个系统消息
+
+    role_map_ui = {"user": "用户", "assistant": "助手", "tool": "工具"} # "system" 角色不再在这里处理
     turn_separator = "\n---\n"
-    
-    # 处理其他消息
+
+    # 组合用户和助手消息
     for i, msg in enumerate(messages):
-        if i in processed_system_message_indices:
+        if i == first_system_message_index: # 跳过已处理的系统消息
             continue
-        
-        if msg.role == 'system':
-            logger.info(f"[{req_id}] (准备提示) 跳过在索引 {i} 的后续系统消息。")
+        if msg.role == 'system': # 跳过所有其他系统消息
+            logger.info(f"[{req_id}] (准备提示) 跳过在索引 {i} 的系统消息 (主提示组合阶段)。")
             continue
-        
-        if combined_parts:
+
+        if combined_parts: # 在角色之间添加分隔符，但不是在最开始
             combined_parts.append(turn_separator)
-        
-        role = msg.role or 'unknown'
-        role_prefix_ui = f"{role_map_ui.get(role, role.capitalize())}:\n"
+
+        role_prefix_ui = f"{role_map_ui.get(msg.role, msg.role.capitalize())}:\n"
         current_turn_parts = [role_prefix_ui]
-        
-        content = msg.content or ''
         content_str = ""
-        
-        if isinstance(content, str):
-            content_str = content.strip()
-        elif isinstance(content, list):
-            # 处理多模态内容
+
+        if isinstance(msg.content, str):
+            content_str = msg.content.strip()
+        elif isinstance(msg.content, list): # 处理 content 是列表的情况 (例如多模态消息)
             text_parts = []
-            for item in content:
-                if hasattr(item, 'type') and item.type == 'text':
-                    text_parts.append(item.text or '')
-                elif isinstance(item, dict) and item.get('type') == 'text':
-                    text_parts.append(item.get('text', ''))
-                else:
-                    logger.warning(f"[{req_id}] (准备提示) 警告: 在索引 {i} 的消息中忽略非文本或未知类型的 content item")
+            for item_model in msg.content:
+                if isinstance(item_model, dict): # 兼容旧的 dict 格式
+                    item_type = item_model.get('type')
+                    if item_type == 'text' and isinstance(item_model.get('text'), str):
+                        text_parts.append(item_model['text'])
+                    else:
+                        logger.warning(f"[{req_id}] (准备提示) 警告: 在索引 {i} 的消息中忽略非文本或未知类型的 dict content item: 类型={item_type}")
+                elif isinstance(item_model, MessageContentItem): # 处理 Pydantic 模型
+                    if item_model.type == 'text' and isinstance(item_model.text, str):
+                        text_parts.append(item_model.text)
+                    else:
+                        logger.warning(f"[{req_id}] (准备提示) 警告: 在索引 {i} 的消息中忽略非文本或未知类型的 MessageContentItem: 类型={item_model.type}")
             content_str = "\n".join(text_parts).strip()
-        else:
-            logger.warning(f"[{req_id}] (准备提示) 警告: 角色 {role} 在索引 {i} 的内容类型意外 ({type(content)}) 或为 None。")
-            content_str = str(content or "").strip()
-        
+        elif msg.content is None and msg.role == 'assistant' and hasattr(msg, 'tool_calls') and msg.tool_calls:
+            pass # 允许助手消息只有工具调用而无文本内容
+        elif msg.content is None and msg.role == 'tool':
+             logger.warning(f"[{req_id}] (准备提示) 警告: 角色 'tool' 在索引 {i} 的 content 为 None，这通常不符合预期。")
+        else: # 其他意外情况
+            logger.warning(f"[{req_id}] (准备提示) 警告: 角色 {msg.role} 在索引 {i} 的内容类型意外 ({type(msg.content)}) 或为 None。将尝试转换为空字符串。")
+            content_str = str(msg.content or "").strip()
+
         if content_str:
             current_turn_parts.append(content_str)
-        
-        # 处理工具调用
-        tool_calls = msg.tool_calls
-        if role == 'assistant' and tool_calls:
-            if content_str:
+
+        # 处理工具调用 (主要用于助手消息)
+        if msg.role == 'assistant' and hasattr(msg, 'tool_calls') and msg.tool_calls:
+            if content_str: # 如果已有文本内容，在工具调用前加换行
                 current_turn_parts.append("\n")
-            
             tool_call_visualizations = []
-            for tool_call in tool_calls:
-                if hasattr(tool_call, 'type') and tool_call.type == 'function':
-                    function_call = tool_call.function
-                    func_name = function_call.name if function_call else None
-                    func_args_str = function_call.arguments if function_call else None
+            if msg.tool_calls: # 确保 tool_calls 存在且非空
+                for tool_call in msg.tool_calls:
+                    # 兼容字典和 Pydantic 模型表示的 tool_call
+                    func_name, formatted_args = None, "{}"
+                    if isinstance(tool_call, dict) and tool_call.get('type') == 'function':
+                        function_call_dict = tool_call.get('function')
+                        if isinstance(function_call_dict, dict):
+                            func_name = function_call_dict.get('name')
+                            func_args_str = function_call_dict.get('arguments')
+                            try:
+                                parsed_args = json.loads(func_args_str if func_args_str else '{}')
+                                formatted_args = json.dumps(parsed_args, indent=2, ensure_ascii=False)
+                            except (json.JSONDecodeError, TypeError):
+                                formatted_args = func_args_str if func_args_str is not None else "{}"
+                    elif isinstance(tool_call, ToolCall) and tool_call.type == 'function':
+                        func_name = tool_call.function.name
+                        try:
+                            parsed_args = json.loads(tool_call.function.arguments or '{}')
+                            formatted_args = json.dumps(parsed_args, indent=2, ensure_ascii=False)
+                        except (json.JSONDecodeError, TypeError):
+                            formatted_args = tool_call.function.arguments or "{}"
                     
-                    try:
-                        parsed_args = json.loads(func_args_str if func_args_str else '{}')
-                        formatted_args = json.dumps(parsed_args, indent=2, ensure_ascii=False)
-                    except (json.JSONDecodeError, TypeError):
-                        formatted_args = func_args_str if func_args_str is not None else "{}"
-                    
-                    tool_call_visualizations.append(
-                        f"请求调用函数: {func_name}\n参数:\n{formatted_args}"
-                    )
-            
+                    if func_name:
+                        tool_call_visualizations.append(
+                            f"请求调用函数: {func_name}\n参数:\n{formatted_args}"
+                        )
             if tool_call_visualizations:
                 current_turn_parts.append("\n".join(tool_call_visualizations))
         
-        if len(current_turn_parts) > 1 or (role == 'assistant' and tool_calls):
+        # 处理工具消息的名称和ID (如果适用)
+        if msg.role == 'tool' and hasattr(msg, 'tool_call_id') and msg.tool_call_id:
+            if hasattr(msg, 'name') and msg.name and content_str: # 有名称和内容
+                pass # 内容已在上面处理
+            elif not content_str: # 无内容
+                 logger.warning(f"[{req_id}] (准备提示) 警告: 角色 'tool' (ID: {msg.tool_call_id}, Name: {getattr(msg, 'name', 'N/A')}) 在索引 {i} 的 content 为空。")
+
+        # 添加当前轮次到主提示 (如果非空)
+        if len(current_turn_parts) > 1 or (msg.role == 'assistant' and hasattr(msg, 'tool_calls') and msg.tool_calls): # 有内容或有工具调用
             combined_parts.append("".join(current_turn_parts))
-        elif not combined_parts and not current_turn_parts:
-            logger.info(f"[{req_id}] (准备提示) 跳过角色 {role} 在索引 {i} 的空消息 (且无工具调用)。")
-        elif len(current_turn_parts) == 1 and not combined_parts:
-            logger.info(f"[{req_id}] (准备提示) 跳过角色 {role} 在索引 {i} 的空消息 (只有前缀)。")
-    
-    final_prompt = "".join(combined_parts)
-    if final_prompt:
-        final_prompt += "\n"
-    
-    preview_text = final_prompt[:300].replace('\n', '\\n')
-    logger.info(f"[{req_id}] (准备提示) 组合提示长度: {len(final_prompt)}。预览: '{preview_text}...'")
-    
-    return final_prompt 
+        elif not combined_parts and not current_turn_parts: # 跳过完全空的第一条消息
+            logger.info(f"[{req_id}] (准备提示) 跳过角色 {msg.role} 在索引 {i} 的空消息 (且无工具调用)。")
+        elif len(current_turn_parts) == 1 and not combined_parts: # 跳过只有前缀的第一条消息
+             logger.info(f"[{req_id}] (准备提示) 跳过角色 {msg.role} 在索引 {i} 的空消息 (只有前缀)。")
+
+    final_user_assistant_prompt = "".join(combined_parts)
+    if final_user_assistant_prompt: # 只为用户/助手提示添加结尾换行
+        final_user_assistant_prompt += "\n"
+
+    preview_text = final_user_assistant_prompt[:300].replace('\n', '\\n')
+    logger.info(f"[{req_id}] (准备提示) 组合的用户/助手提示长度: {len(final_user_assistant_prompt)}。预览: '{preview_text}...'")
+    if system_prompt_content is not None: # 即使是空字符串也记录
+        logger.info(f"[{req_id}] (准备提示) 提取的系统提示 (长度 {len(system_prompt_content)}): '{system_prompt_content[:80] if system_prompt_content else '[空字符串]'}'")
+    else:
+        logger.info(f"[{req_id}] (准备提示) 未提取到系统提示 (将为 None)。")
+        
+    return system_prompt_content, final_user_assistant_prompt
 
 
 def estimate_tokens(text: str) -> int:
@@ -366,4 +401,4 @@ def calculate_usage_stats(messages: List[dict], response_content: str, reasoning
 
 def generate_sse_stop_chunk_with_usage(req_id: str, model: str, usage_stats: dict, reason: str = "stop") -> str:
     """生成带usage统计的SSE停止块"""
-    return generate_sse_stop_chunk(req_id, model, reason, usage_stats) 
+    return generate_sse_stop_chunk(req_id, model, reason, usage_stats)

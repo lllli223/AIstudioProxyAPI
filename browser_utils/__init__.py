@@ -9,7 +9,8 @@ from .operations import (
     get_response_via_copy_button,
     _wait_for_response_completion,
     _get_final_response_content,
-    get_raw_text_content
+    get_raw_text_content,
+    set_system_prompt_in_page
 )
 from .model_management import (
     switch_ai_studio_model,

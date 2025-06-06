@@ -8,13 +8,98 @@ import os
 import logging
 from typing import Optional, Any, List, Dict, Callable, Set
 
-from playwright.async_api import Page as AsyncPage, Locator, Error as PlaywrightAsyncError
+from playwright.async_api import Page as AsyncPage, Locator, Error as PlaywrightAsyncError, expect as expect_async
 
 # 导入配置和模型
 from config import *
 from models import ClientDisconnectedError
 
 logger = logging.getLogger("AIStudioProxyServer")
+
+from typing import Dict, Any
+page_params_cache: Dict[str, Any] = {}
+
+async def set_system_prompt_in_page(
+    page: AsyncPage,
+    system_prompt: str,
+    req_id: str,
+    check_client_disconnected: Callable
+):
+    """设置页面上的系统提示词，使用缓存避免不必要的交互。"""
+    normalized_current_prompt = system_prompt if system_prompt is not None else ""
+    from server import logger
+    # 此函数在 params_cache_lock 外部被调用，但其内部逻辑应在 params_cache_lock 内执行
+    # 为确保安全，这里再次获取锁，或者依赖调用方已获取锁。
+    # 鉴于此函数可能被多处调用，内部获取锁更安全。
+    # async with params_cache_lock: # 移除此处的锁，依赖外部调用时已获取
+    cached_system_prompt = page_params_cache.get("system_prompt")
+
+    if cached_system_prompt is not None and cached_system_prompt == normalized_current_prompt:
+        logger.info(f"[{req_id}] 系统提示 ('{normalized_current_prompt[:30]}...') 与缓存值一致。跳过页面交互。")
+        return
+
+    logger.info(f"[{req_id}] 尝试设置系统提示 (长度 {len(normalized_current_prompt)}): '{normalized_current_prompt[:80]}...'")
+
+    open_button_locator = page.locator(SYSTEM_INSTRUCTIONS_BUTTON_SELECTOR).first
+    textarea_locator = page.locator(SYSTEM_INSTRUCTIONS_TEXTAREA_SELECTOR).first
+
+    try:
+        check_client_disconnected("系统提示 - 开始设置前: ")
+
+        # 检查文本框是否已可见
+        # 使用 is_visible() 而不是 expect().to_be_visible() 来避免在元素不存在时抛出 AssertionError
+        # is_visible() 在元素不存在时会快速返回 False (在超时内)
+        if await textarea_locator.is_visible(timeout=1000): # 短暂超时检查，如果它已经在了
+            logger.info(f"[{req_id}] 系统提示文本框已可见。")
+        else:
+            logger.info(f"[{req_id}] 系统提示文本框初始不可见或不存在，尝试点击打开按钮...")
+            await expect_async(open_button_locator).to_be_visible(timeout=CLICK_TIMEOUT_MS)
+            check_client_disconnected("系统提示 - 打开按钮可见后: ")
+            await open_button_locator.click(timeout=CLICK_TIMEOUT_MS)
+            check_client_disconnected("系统提示 - 点击打开按钮后: ")
+            # 点击后，再断言文本框变得可见
+            await expect_async(textarea_locator).to_be_visible(timeout=CLICK_TIMEOUT_MS)
+            logger.info(f"[{req_id}] 系统提示文本框已打开/可见。")
+                # 填充文本框
+        await textarea_locator.fill(normalized_current_prompt, timeout=CLICK_TIMEOUT_MS)
+        check_client_disconnected("系统提示 - 填充文本框后: ")
+        
+        # 验证填充是否成功
+        filled_value = await textarea_locator.input_value(timeout=2000)
+        check_client_disconnected("系统提示 - 读取填充值后: ")
+
+        if filled_value == normalized_current_prompt:
+            logger.info(f"[{req_id}] ✅ 系统提示已成功设置为 (长度 {len(normalized_current_prompt)}): '{normalized_current_prompt[:80]}...'")
+            page_params_cache["system_prompt"] = normalized_current_prompt # 更新缓存
+        else:
+            logger.warning(f"[{req_id}] ⚠️ 系统提示填充后验证失败。期望: '{normalized_current_prompt[:80]}...', 实际: '{filled_value[:80]}...'. 缓存未更新。")
+            await save_error_snapshot(f"system_prompt_fill_verify_fail_{req_id}")
+            # 不更新缓存，以便下次重试或让错误更明显
+            
+    except TimeoutError as e: # Playwright 的操作超时通常是 TimeoutError (playwright.sync_api.Error 的子类)
+        logger.error(f"[{req_id}] 操作超时: {e}")
+        # 根据需要处理超时，可能需要 check_client_disconnected
+        check_client_disconnected(f"系统提示 - 超时后 ({e}): ")
+        raise # 重新抛出异常或进行其他错误处理
+    except Exception as e:
+        logger.error(f"[{req_id}] ❌ 设置系统提示时发生未知错误: {e}", exc_info=True) # exc_info=True 会记录 traceback
+        check_client_disconnected(f"系统提示 - 发生未知错误后 ({e}): ")
+        raise # 重新抛出异常或进行其他错误处理
+        
+    except ClientDisconnectedError:
+        logger.info(f"[{req_id}] 客户端在设置系统提示时断开连接。")
+        page_params_cache.pop("system_prompt", None) # 清除缓存，因为操作未完成
+        raise
+    except PlaywrightAsyncError as pw_err:
+        logger.error(f"[{req_id}] ❌ 操作页面设置系统提示时发生Playwright错误: {pw_err}")
+        page_params_cache.pop("system_prompt", None) # 出错时清除缓存
+        await save_error_snapshot(f"system_prompt_playwright_error_{req_id}")
+        # 不向上抛出，允许主流程继续，但系统提示可能未按预期设置
+    except Exception as e:
+        logger.exception(f"[{req_id}] ❌ 设置系统提示时发生未知错误")
+        page_params_cache.pop("system_prompt", None) # 出错时清除缓存
+        await save_error_snapshot(f"system_prompt_unknown_error_{req_id}")
+        # 同上，不向上抛出
 
 async def get_raw_text_content(response_element: Locator, previous_text: str, req_id: str) -> str:
     """从响应元素获取原始文本内容"""

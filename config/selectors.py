@@ -7,11 +7,13 @@ CSS选择器配置模块
 PROMPT_TEXTAREA_SELECTOR = 'ms-prompt-input-wrapper ms-autosize-textarea textarea'
 INPUT_SELECTOR = PROMPT_TEXTAREA_SELECTOR
 INPUT_SELECTOR2 = PROMPT_TEXTAREA_SELECTOR
+SYSTEM_INSTRUCTIONS_TEXTAREA_SELECTOR = 'textarea[placeholder="Optional tone and style instructions for the model"].toolbar-expand-textarea'
 
 # --- 按钮选择器 ---
 SUBMIT_BUTTON_SELECTOR = 'button[aria-label="Run"].run-button'
 CLEAR_CHAT_BUTTON_SELECTOR = 'button[data-test-clear="outside"][aria-label="Clear chat"]'
 CLEAR_CHAT_CONFIRM_BUTTON_SELECTOR = 'button.mdc-button:has-text("Continue")'
+SYSTEM_INSTRUCTIONS_BUTTON_SELECTOR = 'button[data-test-si][aria-label="System instructions"]'
 
 # --- 响应相关选择器 ---
 RESPONSE_CONTAINER_SELECTOR = 'ms-chat-turn .chat-turn-container.model'

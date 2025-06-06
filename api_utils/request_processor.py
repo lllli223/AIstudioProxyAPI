@@ -30,7 +30,8 @@ from browser_utils import (
     detect_and_extract_page_error,
     get_response_via_edit_button,
     get_response_via_copy_button,
-    get_raw_text_content
+    get_raw_text_content,
+    set_system_prompt_in_page,
 )
 
 # --- api_utils模块导入 ---
@@ -275,10 +276,10 @@ async def _prepare_and_validate_request(req_id: str, request: ChatCompletionRequ
     except ValueError as e: 
         raise HTTPException(status_code=400, detail=f"[{req_id}] 无效请求: {e}")
     
-    prepared_prompt = prepare_combined_prompt(request.messages, req_id)
+    system_prompt_content, prepared_prompt = prepare_combined_prompt(request.messages, req_id)
     check_client_disconnected("After Prompt Prep: ")
     
-    return prepared_prompt
+    return system_prompt_content, prepared_prompt
 
 
 async def _clear_chat_history(req_id: str, page: AsyncPage, check_client_disconnected: Callable) -> None:
@@ -1405,21 +1406,30 @@ async def _process_request_refactored(
         await _handle_parameter_cache(req_id, context)
         
         # 7. 准备和验证请求
-        prepared_prompt = await _prepare_and_validate_request(req_id, request, check_client_disconnected)
+        system_prompt_content, prepared_prompt = await _prepare_and_validate_request(req_id, request, check_client_disconnected)
         
         # 8. 清空聊天记录
         await _clear_chat_history(req_id, page, check_client_disconnected)
         check_client_disconnected("After Clear Chat: ")
         
-        # 9. 调整请求参数
+        # 9. 设置系统提示 
+        await set_system_prompt_in_page(
+            page,
+            system_prompt_content if system_prompt_content else "",
+            req_id,
+            check_client_disconnected
+        )
+        check_client_disconnected("After Set System Prompt: ")
+        
+        # 10. 调整请求参数
         await _adjust_request_parameters(req_id, page, request, context, check_client_disconnected)
         check_client_disconnected("After Parameters Adjustment: ")
         
-        # 10. 提交提示
+        # 11. 提交提示
         await _submit_prompt(req_id, page, prepared_prompt, check_client_disconnected)
         check_client_disconnected("After Input Submit: ")
         
-        # 11. 处理响应
+        # 12. 处理响应
         response_result = await _handle_response_processing(
             req_id, request, page, context, result_future, submit_button_locator, check_client_disconnected
         )
