@@ -11,7 +11,8 @@ import sys
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from playwright.async_api import Browser as AsyncBrowser, Playwright as AsyncPlaywright
 
 # --- 配置模块导入 ---
@@ -311,6 +312,55 @@ async def lifespan(app_param: FastAPI):
         restore_original_streams(initial_stdout_before_redirect, initial_stderr_before_redirect)
         restore_original_streams(true_original_stdout, true_original_stderr)
         logger.info(f"✅ FastAPI 应用生命周期: 关闭完成。")
+        
+# --- 鉴权配置 ---
+auth_logger = logging.getLogger("app.auth") 
+API_KEY = os.getenv("API_KEY") # 从环境变量获取 API Key
+api_key_scheme = HTTPBearer()
+async def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(api_key_scheme)):
+    """
+    验证 API 密钥。
+    - 如果环境变量 API_KEY 未设置，则跳过验证，允许所有请求。
+    - 如果已设置，则强制要求提供有效的 Bearer Token。
+    """
+    # 如果服务器未配置API_KEY，则不进行任何验证
+    if not API_KEY:
+        auth_logger.info("未获取到API_KEY环境变量，跳过API密钥验证。")
+        return credentials
+
+    # 检查凭据是否存在
+    if not credentials:
+        auth_logger.warning("Auth failed: No credentials provided.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated. API Key is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # 检查认证方案是否为 "Bearer"
+    if credentials.scheme != "Bearer":
+        auth_logger.warning(f"Auth failed: Invalid scheme '{credentials.scheme}'. 'Bearer' required.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication scheme. 'Bearer' token required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # 验证密钥是否匹配 (使用更安全的方式，虽然对于简单字符串差异不大，但养成好习惯)
+    # import hmac
+    # is_valid = hmac.compare_digest(credentials.credentials, API_KEY)
+    is_valid = credentials.credentials == API_KEY
+    
+    if not is_valid:
+        auth_logger.warning("Auth failed: Invalid API Key provided.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API Key.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # 验证成功
+    return credentials
 
 
 def create_app() -> FastAPI:
@@ -335,10 +385,10 @@ def create_app() -> FastAPI:
     app.get("/webui.js")(get_js)
     app.get("/api/info")(get_api_info)
     app.get("/health")(health_check)
-    app.get("/v1/models")(list_models)
-    app.post("/v1/chat/completions")(chat_completions)
-    app.post("/v1/cancel/{req_id}")(cancel_request)
-    app.get("/v1/queue")(get_queue_status)
+    app.get("/v1/models", dependencies=[Depends(verify_api_key)])(list_models)
+    app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key)])(chat_completions)
+    app.post("/v1/cancel/{req_id}", dependencies=[Depends(verify_api_key)])(cancel_request)
+    app.get("/v1/queue", dependencies=[Depends(verify_api_key)])(get_queue_status)
     app.websocket("/ws/logs")(websocket_log_endpoint)
     
     return app 
