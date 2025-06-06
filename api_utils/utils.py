@@ -174,6 +174,39 @@ async def use_helper_get_response(helper_endpoint: str, helper_sapisid: str) -> 
         logger.error(f"使用Helper端点时出错: {e}")
 
 
+def is_incremental_messages(old_messages: Optional[List['Message']], new_messages: List['Message'], req_id: str) -> bool:
+    """
+    判断 new_messages 是否是 old_messages 的增量。
+    增量定义为：old_messages 非空，new_messages 以 old_messages 开头，且 new_messages 更长。
+    """
+    from server import logger, TRACE_LOGS_ENABLED
+    
+    if old_messages is None:
+        logger.debug(f"[{req_id}] (is_incremental) 否: 无旧消息。")
+        return False
+    if len(new_messages) <= len(old_messages):
+        logger.debug(f"[{req_id}] (is_incremental) 否: 新消息列表不够长 (新: {len(new_messages)}, 旧: {len(old_messages)})。")
+        return False
+
+    # 逐条比较旧消息部分是否完全一致
+    for i in range(len(old_messages)):
+        # Pydantic 模型可以直接比较，会自动比较所有字段
+        if old_messages[i] != new_messages[i]:
+            if TRACE_LOGS_ENABLED: # 仅在 TRACE 级别记录详细差异
+                logger.trace(f"[{req_id}] (is_incremental) 否: 消息在索引 {i} 处不匹配。")
+                try:
+                    logger.trace(f"  Old[{i}]: {old_messages[i].model_dump_json(indent=2)}")
+                    logger.trace(f"  New[{i}]: {new_messages[i].model_dump_json(indent=2)}")
+                except Exception: # 防御性编程，避免日志本身出错
+                    logger.trace(f"  (无法序列化消息进行详细比较)")
+            else:
+                logger.debug(f"[{req_id}] (is_incremental) 否: 消息在索引 {i} 处不匹配。")
+            return False
+            
+    logger.debug(f"[{req_id}] (is_incremental) 是: 新消息列表是旧消息列表的增量扩展。")
+    return True
+
+
 # --- 请求验证函数 ---
 def validate_chat_request(messages: List[Message], req_id: str) -> Dict[str, Optional[str]]:
     """验证聊天请求"""

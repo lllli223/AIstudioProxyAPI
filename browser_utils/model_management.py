@@ -102,6 +102,8 @@ async def switch_ai_studio_model(page: AsyncPage, model_id: str, req_id: str) ->
                     logger.warning(f"[{req_id}] 读取页面显示的当前模型名称时出错: {e_disp}。将无法验证页面显示。")
             
             if page_display_match:
+                last_api_messages_synced_to_page = None
+                logger.info(f"[{req_id}] 模型切换成功，已清空 last_api_messages_synced_to_page。")
                 return True
             else:
                 logger.error(f"[{req_id}] ❌ 模型切换失败，因为页面显示的模型与期望不符 (即使localStorage可能已更改)。")

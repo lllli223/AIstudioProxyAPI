@@ -79,6 +79,8 @@ __all__ = [
     'LOG_DIR',
     'APP_LOG_FILE_PATH',
     'NO_PROXY_ENV',
+    'last_api_messages_synced_to_page',
+    'page_sync_cache_lock',
     
     # 工具函数
     'get_environment_variable',

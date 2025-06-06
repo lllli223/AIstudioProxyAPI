@@ -9,7 +9,8 @@ import os
 import platform
 import sys
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, List
+from models import Message
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -105,6 +106,7 @@ async def lifespan(app_param: FastAPI):
     server.processing_lock = Lock()
     server.model_switching_lock = Lock()
     server.params_cache_lock = Lock()
+    server.page_sync_cache_lock = Lock() # 修正：正确初始化 server 模块上的锁
     
     # 初始化代理设置 - 移动到server模块中进行全局配置
     PROXY_SERVER_ENV = "http://127.0.0.1:3120/"
@@ -188,6 +190,9 @@ async def lifespan(app_param: FastAPI):
                     server.page_instance = temp_page_instance
                     server.is_page_ready = temp_is_page_ready
                     await _handle_initial_model_state_and_storage(server.page_instance)
+                    async with server.page_sync_cache_lock: # 修正：使用 server 模块上的锁
+                        server.last_api_messages_synced_to_page = None # 修正：使用 server 模块上的变量
+                        logger.info("页面初始化成功，已清空 last_api_messages_synced_to_page。")
                 else:
                     server.is_page_ready = False
                     if not server.model_list_fetch_event.is_set(): 
@@ -308,7 +313,9 @@ async def lifespan(app_param: FastAPI):
             finally: 
                 server.playwright_manager = None
                 server.is_playwright_ready = False
-        
+                
+        server.last_api_messages_synced_to_page = None # 修正：使用 server 模块上的变量
+        logger.info(f"   重置 last_api_messages_synced_to_page 缓存。")
         restore_original_streams(initial_stdout_before_redirect, initial_stderr_before_redirect)
         restore_original_streams(true_original_stdout, true_original_stderr)
         logger.info(f"✅ FastAPI 应用生命周期: 关闭完成。")
@@ -391,4 +398,4 @@ def create_app() -> FastAPI:
     app.get("/v1/queue", dependencies=[Depends(verify_api_key)])(get_queue_status)
     app.websocket("/ws/logs")(websocket_log_endpoint)
     
-    return app 
+    return app
